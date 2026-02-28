@@ -455,9 +455,10 @@ class App(tk.Tk):
 
     def _open_mxm_folder(self) -> None:
         base = Path(self.var_pdf_dir.get().strip() or ".")
-        destino = base / "MXM"
-        if not destino.exists():
-            self._append_log(f"[{self._timestamp()}] [AVISO] Pasta MXM ainda não existe: {destino}\n")
+        candidatos = [DATA_ROOT / "MXM", base / "MXM"]
+        destino = next((p for p in candidatos if p.exists()), None)
+        if destino is None:
+            self._append_log(f"[{self._timestamp()}] [AVISO] Pasta MXM ainda não existe: {candidatos[0]}\n")
             return
 
         try:

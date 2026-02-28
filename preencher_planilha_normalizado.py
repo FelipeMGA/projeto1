@@ -189,6 +189,8 @@ def carregar_cache_manual():
 def salvar_cache_manual():
     """Persiste o cache manual em disco quando houve novas entradas."""
 
+    global _NOME_MANUAL_CACHE_SUJO
+
     if not MANUAL_CACHE_PATH or not _NOME_MANUAL_CACHE_SUJO:
         return
 
@@ -1404,7 +1406,8 @@ def inserir_logotipo(ws):
     (Nomes dos itens não levam 'FM', apenas o arquivo de logo da empresa.)
     """
     img_path = None
-    diretorios_busca = [PDF_DIR, Path(".")]
+    script_dir = Path(__file__).resolve().parent
+    diretorios_busca = [PDF_DIR, script_dir / "DADOS_MXM", script_dir, Path.cwd()]
     tipo_logo = _tipo_logo_por_setor(ws.title)
     if tipo_logo:
         img_path = _encontrar_logo(tipo_logo, diretorios_busca)
