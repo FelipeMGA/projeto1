@@ -51,6 +51,20 @@ jobs:
           if anchor not in s:
               raise SystemExit('MainActivity native anchor not found')
           p.write_text(s.replace(anchor, compat + anchor, 1))
+
+          # Reserve an uncompressed 12 MiB asset slot. The real ROM is never uploaded;
+          # its bytes are substituted locally after the APK is downloaded.
+          g = Path('upstream/android/app/build.gradle')
+          gs = g.read_text()
+          android_anchor = 'android {\n'
+          if android_anchor not in gs:
+              raise SystemExit('build.gradle android block not found')
+          gs = gs.replace(android_anchor, android_anchor + "    aaptOptions { noCompress 'z64' }\n", 1)
+          g.write_text(gs)
+          asset = Path('upstream/android/app/src/main/assets/ge.z64')
+          asset.parent.mkdir(parents=True, exist_ok=True)
+          with asset.open('wb') as f:
+              f.truncate(12 * 1024 * 1024)
           PY
 
       - name: Install Android NDK and CMake
@@ -68,17 +82,29 @@ jobs:
           chmod +x gradlew
           ./gradlew --no-daemon assembleDebug --stacktrace
 
-      - name: Verify APK
+      - name: Verify reserved ROM slot
         run: |
           APK=upstream/android/app/build/outputs/apk/debug/app-debug.apk
           test -f "$APK"
+          python3 - <<'PY'
+          import zipfile
+          apk='upstream/android/app/build/outputs/apk/debug/app-debug.apk'
+          with zipfile.ZipFile(apk) as z:
+              i=z.getinfo('assets/ge.z64')
+              assert i.file_size == 12*1024*1024, i.file_size
+              assert i.compress_type == zipfile.ZIP_STORED, i.compress_type
+              print('ROM slot OK:', i.file_size, 'bytes, STORED')
+          PY
           ls -lh "$APK"
           sha256sum "$APK"
+          mkdir -p /tmp/geflat-output
+          cp "$APK" /tmp/geflat-output/GoldenEye007-Android-ARM64-skeleton.apk
+          cp "$ANDROID_HOME/build-tools/34.0.0/lib/apksigner.jar" /tmp/geflat-output/apksigner.jar
 
-      - name: Upload APK without ROM
+      - name: Upload signing skeleton
         uses: actions/upload-artifact@v4
         with:
-          name: GoldenEye007-Android-ARM64-no-rom
-          path: upstream/android/app/build/outputs/apk/debug/app-debug.apk
+          name: GoldenEye007-Android-ARM64-skeleton
+          path: /tmp/geflat-output/
           if-no-files-found: error
           retention-days: 1
