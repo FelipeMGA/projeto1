@@ -52,10 +52,7 @@ jobs:
               raise SystemExit('MainActivity native anchor not found')
           p.write_text(s.replace(anchor, compat + anchor, 1))
 
-          # Black-screen fix: phones can expose GL_OVR_multiview even though the flat
-          # build never creates an OpenXR session. The VR backend then compiles
-          # multiview shaders for a normal Android surface. Keep this build strictly
-          # single-view and use the fork's explicit flat-shader state.
+          # Black-screen fix v2: never enable OVR multiview in a normal phone surface.
           ogl = Path('upstream/port/fast3d/gfx_opengl.cpp')
           os = ogl.read_text()
           old = '''    // VR\n    gfx_opengl_init_multiview();'''
@@ -67,10 +64,41 @@ jobs:
           gfx = Path('upstream/port/fast3d/gfx_pc.cpp')
           gs = gfx.read_text()
           old = '''#ifdef GE_ANDROID_FLAT\n    /* Native flat path: same Fast3D display list, no emulation and no XR compositor. */\n    gfx_rapi->start_draw_to_framebuffer(0, (float)gfx_current_dimensions.height / SCREEN_HEIGHT);\n    gfx_rapi->clear_framebuffer(true, false);\n    gfx_run_dl(commands);\n    gfx_flush();\n    gfx_rapi->end_frame();\n    gfx_wapi->swap_buffers_begin();\n    return;\n#endif'''
-          new = '''#ifdef GE_ANDROID_FLAT\n    /* Smartphone path: ordinary single-view GLES framebuffer. */\n    gfx_update_aspect_mode();\n    gVrFlatPass = true;\n    gfx_rapi->set_eye_offsets(0.0f, 0.0f, 0.0f, 0.0f,\n                              0.0f, 0.0f, 0.0f, 0.0f);\n    gfx_rapi->start_draw_to_framebuffer(game_renders_to_framebuffer ? game_framebuffer : 0,\n                                        (float)gfx_current_dimensions.height / SCREEN_HEIGHT);\n    gfx_rapi->clear_framebuffer(true, false);\n    gfx_run_dl(commands);\n    gfx_flush();\n    gfxFramebuffer = 0;\n\n    if (game_renders_to_framebuffer) {\n        gfx_rapi->start_draw_to_framebuffer(0, 1.0f);\n        gfx_rapi->clear_framebuffer(true, true);\n        if (gfx_msaa_level > 1) {\n            bool different_size = gfx_current_dimensions.width != gfx_current_game_window_viewport.width ||\n                                  gfx_current_dimensions.height != gfx_current_game_window_viewport.height;\n            if (different_size) {\n                gfx_rapi->resolve_msaa_color_buffer(game_framebuffer_msaa_resolved, game_framebuffer);\n                gfxFramebuffer = (uintptr_t)gfx_rapi->get_framebuffer_texture_id(game_framebuffer_msaa_resolved);\n            } else {\n                gfx_rapi->resolve_msaa_color_buffer(0, game_framebuffer);\n            }\n        } else {\n            gfxFramebuffer = (uintptr_t)gfx_rapi->get_framebuffer_texture_id(game_framebuffer);\n        }\n    }\n\n    gVrFlatPass = false;\n    gfx_rapi->end_frame();\n    gfx_wapi->swap_buffers_begin();\n    return;\n#endif'''
+          new = '''#ifdef GE_ANDROID_FLAT\n    /* Smartphone path: ordinary single-view GLES framebuffer. */\n    gfx_update_aspect_mode();\n    gVrFlatPass = false;\n    gfx_rapi->set_eye_offsets(0.0f, 0.0f, 0.0f, 0.0f,\n                              0.0f, 0.0f, 0.0f, 0.0f);\n    gfx_rapi->start_draw_to_framebuffer(game_renders_to_framebuffer ? game_framebuffer : 0,\n                                        (float)gfx_current_dimensions.height / SCREEN_HEIGHT);\n    gfx_rapi->clear_framebuffer(true, false);\n    gfx_run_dl(commands);\n    gfx_flush();\n    gfxFramebuffer = 0;\n\n    if (game_renders_to_framebuffer) {\n        gfx_rapi->start_draw_to_framebuffer(0, 1.0f);\n        gfx_rapi->clear_framebuffer(true, true);\n        if (gfx_msaa_level > 1) {\n            bool different_size = gfx_current_dimensions.width != gfx_current_game_window_viewport.width ||\n                                  gfx_current_dimensions.height != gfx_current_game_window_viewport.height;\n            if (different_size) {\n                gfx_rapi->resolve_msaa_color_buffer(game_framebuffer_msaa_resolved, game_framebuffer);\n                gfxFramebuffer = (uintptr_t)gfx_rapi->get_framebuffer_texture_id(game_framebuffer_msaa_resolved);\n            } else {\n                gfx_rapi->resolve_msaa_color_buffer(0, game_framebuffer);\n            }\n        } else {\n            gfxFramebuffer = (uintptr_t)gfx_rapi->get_framebuffer_texture_id(game_framebuffer);\n        }\n    }\n\n    gfx_rapi->end_frame();\n    gfx_wapi->swap_buffers_begin();\n    return;\n#endif'''
           if old not in gs:
               raise SystemExit('flat gfx_run anchor not found')
           gfx.write_text(gs.replace(old, new, 1))
+
+          # v3: gfx_sdl_init in the VR fork ignores the window settings and sizes the
+          # SDL surface from OpenXR's VrRecommendedW/H. Without an HMD those values are
+          # not a valid phone drawable. Use the actual flat window size and do not
+          # create the Android window hidden.
+          sdl = Path('upstream/port/fast3d/gfx_sdl2.cpp')
+          ss = sdl.read_text()
+          old = '''    window_width = VrRecommendedW;\n    window_height = VrRecommendedH;'''
+          new = '''#ifdef GE_ANDROID_FLAT\n    window_width = set->width > 0 ? set->width : 1280;\n    window_height = set->height > 0 ? set->height : 720;\n#else\n    window_width = VrRecommendedW;\n    window_height = VrRecommendedH;\n#endif'''
+          if old not in ss:
+              raise SystemExit('SDL window-size anchor not found')
+          ss = ss.replace(old, new, 1)
+          old = '    Uint32 flags = SDL_WINDOW_HIDDEN | SDL_WINDOW_RESIZABLE | SDL_WINDOW_OPENGL;'
+          new = '''#ifdef GE_ANDROID_FLAT\n    Uint32 flags = SDL_WINDOW_RESIZABLE | SDL_WINDOW_OPENGL;\n#else\n    Uint32 flags = SDL_WINDOW_HIDDEN | SDL_WINDOW_RESIZABLE | SDL_WINDOW_OPENGL;\n#endif'''
+          if old not in ss:
+              raise SystemExit('SDL hidden-window anchor not found')
+          ss = ss.replace(old, new, 1)
+          if '#include <GLES3/gl3.h>' not in ss:
+              inc = '#include <android/log.h>\n'
+              if inc not in ss:
+                  raise SystemExit('Android include anchor not found')
+              ss = ss.replace(inc, inc + '#include <GLES3/gl3.h>\n', 1)
+
+          # The flat overlay patch already calls MakeCurrent/SwapWindow. Strengthen it
+          # and add a one-second magenta diagnostic on the real default framebuffer.
+          old = '''#ifdef GE_ANDROID_FLAT\n    SDL_GL_MakeCurrent(wnd, ctx);\n    SDL_GL_SwapWindow(wnd);\n#endif'''
+          new = '''#ifdef GE_ANDROID_FLAT\n    const int mc = SDL_GL_MakeCurrent(wnd, ctx);\n    static unsigned flatDiagFrames = 0;\n    if (mc != 0) {\n        LOGI("flat: SDL_GL_MakeCurrent failed: %s", SDL_GetError());\n    } else if (flatDiagFrames < 60) {\n        int dw = 0, dh = 0;\n        SDL_GL_GetDrawableSize(wnd, &dw, &dh);\n        glBindFramebuffer(GL_FRAMEBUFFER, 0);\n        glViewport(0, 0, dw > 0 ? dw : 1, dh > 0 ? dh : 1);\n        glDisable(GL_SCISSOR_TEST);\n        glClearColor(0.75f, 0.0f, 0.75f, 1.0f);\n        glClear(GL_COLOR_BUFFER_BIT);\n        if (flatDiagFrames == 0) {\n            LOGI("flat: diagnostic drawable=%dx%d context=%p", dw, dh, SDL_GL_GetCurrentContext());\n        }\n        ++flatDiagFrames;\n    }\n    SDL_GL_SwapWindow(wnd);\n#endif'''
+          if old not in ss:
+              raise SystemExit('flat swap anchor not found')
+          ss = ss.replace(old, new, 1)
+          sdl.write_text(ss)
 
           # Reserve an uncompressed 12 MiB asset slot. The real ROM is never uploaded;
           # its bytes are substituted locally after the APK is downloaded.
@@ -118,13 +146,13 @@ jobs:
           ls -lh "$APK"
           sha256sum "$APK"
           mkdir -p /tmp/geflat-output
-          cp "$APK" /tmp/geflat-output/GoldenEye007-Android-ARM64-skeleton-v2.apk
+          cp "$APK" /tmp/geflat-output/GoldenEye007-Android-ARM64-skeleton-v3.apk
           cp "$ANDROID_HOME/build-tools/34.0.0/lib/apksigner.jar" /tmp/geflat-output/apksigner.jar
 
       - name: Upload signing skeleton
         uses: actions/upload-artifact@v4
         with:
-          name: GoldenEye007-Android-ARM64-skeleton-v2
+          name: GoldenEye007-Android-ARM64-skeleton-v3
           path: /tmp/geflat-output/
           if-no-files-found: error
           retention-days: 1
