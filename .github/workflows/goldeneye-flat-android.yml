@@ -33,11 +33,13 @@ jobs:
         run: |
           python3 - <<'PY'
           from pathlib import Path
-          p = Path('/tmp/geflat-kit/GoldenEyeAndroidFlatPort_CI/tools/apply_flat_port.py')
+          p = Path('upstream/port/fast3d/gfx_sdl2.cpp')
           s = p.read_text()
-          s = s.replace('#ifndef ANDROID // if PC', '#ifndef ANDROID')
-          s = s.replace('#ifndef ANDROID\n\n    SDL_GL_MakeCurrent(wnd, ctx);', '#ifndef ANDROID\n    SDL_GL_MakeCurrent(wnd, ctx);')
-          p.write_text(s)
+          old = '#ifndef ANDROID\n    SDL_GL_MakeCurrent(wnd, ctx);'
+          new = '#ifndef ANDROID // if PC\n\n    SDL_GL_MakeCurrent(wnd, ctx);'
+          if old not in s:
+              raise SystemExit('SDL compatibility anchor not found')
+          p.write_text(s.replace(old, new, 1))
           PY
           python3 /tmp/geflat-kit/GoldenEyeAndroidFlatPort_CI/tools/apply_flat_port.py "$GITHUB_WORKSPACE/upstream"
 
