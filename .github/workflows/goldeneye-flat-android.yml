@@ -1,0 +1,64 @@
+name: GoldenEye Flat Android
+
+on:
+  push:
+    branches: [chatgpt-goldeneye-apk]
+    paths:
+      - '.github/workflows/goldeneye-flat-android.yml'
+      - 'geflat/**'
+  workflow_dispatch:
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    steps:
+      - name: Checkout build harness
+        uses: actions/checkout@v4
+        with:
+          ref: chatgpt-goldeneye-apk
+
+      - name: Reassemble flat-port kit
+        run: |
+          cat geflat/kit.part* | base64 -d > /tmp/geflat-kit.zip
+          mkdir -p /tmp/geflat-kit
+          unzip -q /tmp/geflat-kit.zip -d /tmp/geflat-kit
+          test -f /tmp/geflat-kit/GoldenEyeAndroidFlatPort_CI/tools/apply_flat_port.py
+
+      - name: Checkout GoldenEye VR v0.5.6
+        run: |
+          git clone --depth 1 --branch v0.5.6 https://github.com/MrSco/goldeneye-vr.git upstream
+
+      - name: Apply smartphone flat port
+        run: |
+          python3 /tmp/geflat-kit/GoldenEyeAndroidFlatPort_CI/tools/apply_flat_port.py "$GITHUB_WORKSPACE/upstream"
+
+      - name: Install Android NDK and CMake
+        run: |
+          yes | "$ANDROID_HOME/cmdline-tools/latest/bin/sdkmanager" --licenses >/dev/null || true
+          "$ANDROID_HOME/cmdline-tools/latest/bin/sdkmanager" \
+            "platforms;android-34" \
+            "build-tools;34.0.0" \
+            "ndk;25.1.8937393" \
+            "cmake;3.22.1"
+
+      - name: Build debug APK
+        working-directory: upstream/android
+        run: |
+          chmod +x gradlew
+          ./gradlew --no-daemon assembleDebug --stacktrace
+
+      - name: Verify APK
+        run: |
+          APK=upstream/android/app/build/outputs/apk/debug/app-debug.apk
+          test -f "$APK"
+          ls -lh "$APK"
+          sha256sum "$APK"
+
+      - name: Upload APK without ROM
+        uses: actions/upload-artifact@v4
+        with:
+          name: GoldenEye007-Android-ARM64-no-rom
+          path: upstream/android/app/build/outputs/apk/debug/app-debug.apk
+          if-no-files-found: error
+          retention-days: 1
