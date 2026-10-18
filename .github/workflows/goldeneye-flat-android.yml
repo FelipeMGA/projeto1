@@ -52,15 +52,35 @@ jobs:
               raise SystemExit('MainActivity native anchor not found')
           p.write_text(s.replace(anchor, compat + anchor, 1))
 
+          # Black-screen fix: phones can expose GL_OVR_multiview even though the flat
+          # build never creates an OpenXR session. The VR backend then compiles
+          # multiview shaders for a normal Android surface. Keep this build strictly
+          # single-view and use the fork's explicit flat-shader state.
+          ogl = Path('upstream/port/fast3d/gfx_opengl.cpp')
+          os = ogl.read_text()
+          old = '''    // VR\n    gfx_opengl_init_multiview();'''
+          new = '''    // VR\n#ifdef GE_ANDROID_FLAT\n    use_multiview = false;\n#else\n    gfx_opengl_init_multiview();\n#endif'''
+          if old not in os:
+              raise SystemExit('multiview init anchor not found')
+          ogl.write_text(os.replace(old, new, 1))
+
+          gfx = Path('upstream/port/fast3d/gfx_pc.cpp')
+          gs = gfx.read_text()
+          old = '''#ifdef GE_ANDROID_FLAT\n    /* Native flat path: same Fast3D display list, no emulation and no XR compositor. */\n    gfx_rapi->start_draw_to_framebuffer(0, (float)gfx_current_dimensions.height / SCREEN_HEIGHT);\n    gfx_rapi->clear_framebuffer(true, false);\n    gfx_run_dl(commands);\n    gfx_flush();\n    gfx_rapi->end_frame();\n    gfx_wapi->swap_buffers_begin();\n    return;\n#endif'''
+          new = '''#ifdef GE_ANDROID_FLAT\n    /* Smartphone path: ordinary single-view GLES framebuffer. */\n    gfx_update_aspect_mode();\n    gVrFlatPass = true;\n    gfx_rapi->set_eye_offsets(0.0f, 0.0f, 0.0f, 0.0f,\n                              0.0f, 0.0f, 0.0f, 0.0f);\n    gfx_rapi->start_draw_to_framebuffer(game_renders_to_framebuffer ? game_framebuffer : 0,\n                                        (float)gfx_current_dimensions.height / SCREEN_HEIGHT);\n    gfx_rapi->clear_framebuffer(true, false);\n    gfx_run_dl(commands);\n    gfx_flush();\n    gfxFramebuffer = 0;\n\n    if (game_renders_to_framebuffer) {\n        gfx_rapi->start_draw_to_framebuffer(0, 1.0f);\n        gfx_rapi->clear_framebuffer(true, true);\n        if (gfx_msaa_level > 1) {\n            bool different_size = gfx_current_dimensions.width != gfx_current_game_window_viewport.width ||\n                                  gfx_current_dimensions.height != gfx_current_game_window_viewport.height;\n            if (different_size) {\n                gfx_rapi->resolve_msaa_color_buffer(game_framebuffer_msaa_resolved, game_framebuffer);\n                gfxFramebuffer = (uintptr_t)gfx_rapi->get_framebuffer_texture_id(game_framebuffer_msaa_resolved);\n            } else {\n                gfx_rapi->resolve_msaa_color_buffer(0, game_framebuffer);\n            }\n        } else {\n            gfxFramebuffer = (uintptr_t)gfx_rapi->get_framebuffer_texture_id(game_framebuffer);\n        }\n    }\n\n    gVrFlatPass = false;\n    gfx_rapi->end_frame();\n    gfx_wapi->swap_buffers_begin();\n    return;\n#endif'''
+          if old not in gs:
+              raise SystemExit('flat gfx_run anchor not found')
+          gfx.write_text(gs.replace(old, new, 1))
+
           # Reserve an uncompressed 12 MiB asset slot. The real ROM is never uploaded;
           # its bytes are substituted locally after the APK is downloaded.
           g = Path('upstream/android/app/build.gradle')
-          gs = g.read_text()
+          bs = g.read_text()
           android_anchor = 'android {\n'
-          if android_anchor not in gs:
+          if android_anchor not in bs:
               raise SystemExit('build.gradle android block not found')
-          gs = gs.replace(android_anchor, android_anchor + "    aaptOptions { noCompress 'z64' }\n", 1)
-          g.write_text(gs)
+          bs = bs.replace(android_anchor, android_anchor + "    aaptOptions { noCompress 'z64' }\n", 1)
+          g.write_text(bs)
           asset = Path('upstream/android/app/src/main/assets/ge.z64')
           asset.parent.mkdir(parents=True, exist_ok=True)
           with asset.open('wb') as f:
@@ -98,13 +118,13 @@ jobs:
           ls -lh "$APK"
           sha256sum "$APK"
           mkdir -p /tmp/geflat-output
-          cp "$APK" /tmp/geflat-output/GoldenEye007-Android-ARM64-skeleton.apk
+          cp "$APK" /tmp/geflat-output/GoldenEye007-Android-ARM64-skeleton-v2.apk
           cp "$ANDROID_HOME/build-tools/34.0.0/lib/apksigner.jar" /tmp/geflat-output/apksigner.jar
 
       - name: Upload signing skeleton
         uses: actions/upload-artifact@v4
         with:
-          name: GoldenEye007-Android-ARM64-skeleton
+          name: GoldenEye007-Android-ARM64-skeleton-v2
           path: /tmp/geflat-output/
           if-no-files-found: error
           retention-days: 1
