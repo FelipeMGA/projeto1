@@ -42,6 +42,16 @@ jobs:
           p.write_text(s.replace(old, new, 1))
           PY
           python3 /tmp/geflat-kit/GoldenEyeAndroidFlatPort_CI/tools/apply_flat_port.py "$GITHUB_WORKSPACE/upstream"
+          python3 - <<'PY'
+          from pathlib import Path
+          p = Path('upstream/android/app/src/main/java/com/gevr/port/MainActivity.java')
+          s = p.read_text()
+          anchor = '    public native void nativeInit(String dataPath);'
+          compat = '''    // Compatibility with the retained Quest updater; flat Android only re-hides system UI.\n    public static final int REQUEST_INSTALL_PERMISSION = 0x6f;\n    public static final int REQUEST_INSTALLER = 0x70;\n\n    public void comeBackToVr() {\n        runOnUiThread(this::hideSystemUi);\n    }\n\n    public void cancelComeBackToVr() {\n        // No delayed VR transition exists in the flat smartphone activity.\n    }\n\n'''
+          if anchor not in s:
+              raise SystemExit('MainActivity native anchor not found')
+          p.write_text(s.replace(anchor, compat + anchor, 1))
+          PY
 
       - name: Install Android NDK and CMake
         run: |
