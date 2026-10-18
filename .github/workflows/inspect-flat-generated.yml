@@ -32,17 +32,19 @@ jobs:
           python3 /tmp/geflat-kit/GoldenEyeAndroidFlatPort_CI/tools/apply_flat_port.py "$GITHUB_WORKSPACE/upstream"
       - name: Collect generated sources
         run: |
-          mkdir -p /tmp/inspect
-          cp upstream/android/app/src/main/java/com/gevr/port/MainActivity.java /tmp/inspect/
-          cp upstream/android/app/src/main/java/com/gevr/port/TouchControls.java /tmp/inspect/
+          mkdir -p /tmp/inspect/java /tmp/inspect/native
+          cp -a upstream/android/app/src/main/java/com/gevr/port/. /tmp/inspect/java/
           cp upstream/android/app/src/main/AndroidManifest.xml /tmp/inspect/
-          cp upstream/port/src/video.c /tmp/inspect/video.c
-          cp upstream/src/fr.c /tmp/inspect/fr.c
-          cp upstream/port/fast3d/gfx_pc.cpp /tmp/inspect/gfx_pc.cpp
-          cp upstream/port/fast3d/gfx_opengl.cpp /tmp/inspect/gfx_opengl.cpp
-          grep -R "nativeTouch\|nativeStick\|nativeButton\|GE_ANDROID_FLAT" -n upstream/android upstream/port/src upstream/port/fast3d > /tmp/inspect/grep.txt || true
+          cp upstream/port/src/video.c /tmp/inspect/native/video.c
+          cp upstream/port/src/input.c /tmp/inspect/native/input.c
+          cp upstream/port/src/main.c /tmp/inspect/native/main.c
+          cp upstream/port/src/gevr_engine_shim.c /tmp/inspect/native/gevr_engine_shim.c
+          cp upstream/src/fr.c /tmp/inspect/native/fr.c
+          cp upstream/port/fast3d/gfx_pc.cpp /tmp/inspect/native/gfx_pc.cpp
+          cp upstream/port/fast3d/gfx_opengl.cpp /tmp/inspect/native/gfx_opengl.cpp
+          grep -R "nativeTouch\|nativeStick\|nativeButton\|GE_ANDROID_FLAT\|TouchOverlayView" -n upstream/android upstream/port/src upstream/port/fast3d > /tmp/inspect/grep.txt || true
       - uses: actions/upload-artifact@v4
         with:
-          name: flat-generated-sources
+          name: flat-generated-sources-all
           path: /tmp/inspect
           retention-days: 1
