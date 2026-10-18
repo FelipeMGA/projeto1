@@ -54,158 +54,94 @@ jobs:
 
       - name: Apply v7 gyro and camera input patch
         run: |
-          cat > /tmp/apply_v7.py <<'PYV7'
-from pathlib import Path
-root = Path('upstream')
-
-overlay_src = r'''package com.gevr.port;
-
-import android.content.Context;
-import android.content.SharedPreferences;
-import android.graphics.Canvas;
-import android.graphics.Paint;
-import android.graphics.RectF;
-import android.hardware.Sensor;
-import android.hardware.SensorEvent;
-import android.hardware.SensorEventListener;
-import android.hardware.SensorManager;
-import android.hardware.input.InputManager;
-import android.os.Handler;
-import android.os.Looper;
-import android.view.HapticFeedbackConstants;
-import android.view.InputDevice;
-import android.view.MotionEvent;
-import android.view.Surface;
-import android.view.View;
-import android.util.SparseIntArray;
-
-public final class TouchOverlayView extends View implements InputManager.InputDeviceListener, SensorEventListener {
-    public static final int FIRE=1<<0, AIM=1<<1, ACTION=1<<2, WEAPON=1<<3, CROUCH=1<<4, START=1<<5;
-    private static final int ROLE_NONE=0, ROLE_MOVE=1, ROLE_LOOK=2, ROLE_FIRE=3, ROLE_AIM=4, ROLE_ACTION=5, ROLE_WEAPON=6, ROLE_CROUCH=7, ROLE_START=8, ROLE_SETTINGS=9;
-    private static final int SETTINGS_CONTROLS=0, SETTINGS_VIDEO=1;
-    private static final int GYRO_OFF=0, GYRO_AIM=1, GYRO_ALWAYS=2;
-
-    private final Paint fill=new Paint(Paint.ANTI_ALIAS_FLAG), line=new Paint(Paint.ANTI_ALIAS_FLAG), text=new Paint(Paint.ANTI_ALIAS_FLAG);
-    private final SparseIntArray roles=new SparseIntArray();
-    private final Handler handler=new Handler(Looper.getMainLooper());
-    private final InputManager inputManager;
-    private final SharedPreferences prefs;
-    private final SensorManager sensorManager;
-    private final Sensor gyroSensor;
-
-    private float moveX,moveY,touchLookX,touchLookY,gyroLookX,gyroLookY,lookImpulseX,lookImpulseY;
-    private int buttons,movePointer=-1,lookPointer=-1;
-    private float moveCx,moveCy,lookLastX,lookLastY;
-    private boolean lookPumpRunning,settings,hideOnGamepad=true,physicalGamepad,gyroRegistered;
-    private int settingsPage=SETTINGS_CONTROLS;
-    private float touchSensitivity,aimSensitivity,gyroSensitivity,gyroAimSensitivity,gyroFilteredX,gyroFilteredY,opacity,controlScale;
-    private int gyroMode;
-    private int videoAspect,renderScaleIndex,msaaIndex,filterIndex;
-
-    private final RectF fire=new RectF(),aim=new RectF(),action=new RectF(),weapon=new RectF(),crouch=new RectF(),start=new RectF(),gear=new RectF();
-    private final RectF settingsPanel=new RectF(),controlsTab=new RectF(),videoTab=new RectF();
-    private final RectF sensMinus=new RectF(),sensPlus=new RectF(),aimSensMinus=new RectF(),aimSensPlus=new RectF(),gyroModeToggle=new RectF();
-    private final RectF gyroSensMinus=new RectF(),gyroSensPlus=new RectF(),gyroAimMinus=new RectF(),gyroAimPlus=new RectF();
-    private final RectF scaleMinus=new RectF(),scalePlus=new RectF(),alphaMinus=new RectF(),alphaPlus=new RectF(),padToggle=new RectF();
-    private final RectF aspectToggle=new RectF(),renderToggle=new RectF(),msaaToggle=new RectF(),filterToggle=new RectF();
-
-    public TouchOverlayView(Context context){
-        super(context); setWillNotDraw(false); setFocusable(false);
-        prefs=context.getSharedPreferences("touch-controls",Context.MODE_PRIVATE);
-        float old=prefs.getFloat("sensitivity",1.15f);
-        touchSensitivity=prefs.getFloat("touchSensitivity",Math.max(1.25f,old));
-        aimSensitivity=prefs.getFloat("aimSensitivity",1.60f);
-        gyroMode=prefs.getInt("gyroMode",GYRO_ALWAYS);
-        gyroSensitivity=prefs.getFloat("gyroSensitivity",1.00f);
-        gyroAimSensitivity=prefs.getFloat("gyroAimSensitivity",0.85f);
-        opacity=prefs.getFloat("opacity",0.54f); controlScale=prefs.getFloat("scale",1.0f); hideOnGamepad=prefs.getBoolean("hideOnGamepad",true);
-        videoAspect=prefs.getInt("videoAspect",1); renderScaleIndex=prefs.getInt("renderScaleIndex",0); msaaIndex=prefs.getInt("msaaIndex",1); filterIndex=prefs.getInt("filterIndex",1);
-        applyVideoSettings();
-        inputManager=(InputManager)context.getSystemService(Context.INPUT_SERVICE); inputManager.registerInputDeviceListener(this,handler); refreshGamepadState();
-        sensorManager=(SensorManager)context.getSystemService(Context.SENSOR_SERVICE); gyroSensor=sensorManager!=null?sensorManager.getDefaultSensor(Sensor.TYPE_GYROSCOPE):null;
-        line.setStyle(Paint.Style.STROKE); line.setStrokeWidth(dp(2)); text.setTextAlign(Paint.Align.CENTER); text.setFakeBoldText(true);
-    }
-
-    @Override protected void onDetachedFromWindow(){inputManager.unregisterInputDeviceListener(this);onHostPause();nativeClearTouchState();super.onDetachedFromWindow();}
-    public void onHostResume(){updateGyroRegistration();}
-    public void onHostPause(){if(sensorManager!=null&&gyroRegistered){sensorManager.unregisterListener(this);gyroRegistered=false;}gyroLookX=gyroLookY=gyroFilteredX=gyroFilteredY=0f;pushState();}
-    private void updateGyroRegistration(){if(sensorManager==null||gyroSensor==null)return;if(gyroMode==GYRO_OFF){if(gyroRegistered)sensorManager.unregisterListener(this);gyroRegistered=false;gyroLookX=gyroLookY=gyroFilteredX=gyroFilteredY=0f;pushState();}else if(!gyroRegistered){gyroRegistered=sensorManager.registerListener(this,gyroSensor,SensorManager.SENSOR_DELAY_GAME);}}
-
-    private float dp(float v){return v*getResources().getDisplayMetrics().density;} private float clamp(float v,float lo,float hi){return Math.max(lo,Math.min(hi,v));}
-    private boolean isGamepad(InputDevice d){if(d==null||d.isVirtual())return false;int s=d.getSources();return(s&InputDevice.SOURCE_GAMEPAD)==InputDevice.SOURCE_GAMEPAD||(s&InputDevice.SOURCE_JOYSTICK)==InputDevice.SOURCE_JOYSTICK;}
-    private void refreshGamepadState(){physicalGamepad=false;for(int id:InputDevice.getDeviceIds())if(isGamepad(InputDevice.getDevice(id))){physicalGamepad=true;break;}invalidate();}
-    @Override public void onInputDeviceAdded(int id){refreshGamepadState();}@Override public void onInputDeviceRemoved(int id){refreshGamepadState();}@Override public void onInputDeviceChanged(int id){refreshGamepadState();}
-
-    private void layoutControls(){
-        float w=getWidth(),h=getHeight(),r=Math.min(w,h)*.082f*controlScale;
-        setCircle(fire,w*.895f,h*.625f,r*1.12f);setCircle(aim,w*.765f,h*.725f,r*.86f);setCircle(action,w*.895f,h*.835f,r*.88f);setCircle(weapon,w*.952f,h*.405f,r*.72f);setCircle(crouch,w*.650f,h*.850f,r*.73f);setCircle(start,w*.900f,h*.105f,r*.48f);setCircle(gear,w*.965f,h*.105f,r*.42f);
-        if(!settings)return;settingsPanel.set(w*.405f,h*.025f,w*.987f,h*.975f);float l=settingsPanel.left,t=settingsPanel.top,pw=settingsPanel.width(),ph=settingsPanel.height();
-        controlsTab.set(l+pw*.025f,t+ph*.025f,l+pw*.475f,t+ph*.105f);videoTab.set(l+pw*.525f,t+ph*.025f,l+pw*.975f,t+ph*.105f);
-        if(settingsPage==SETTINGS_CONTROLS){float left=l+pw*.04f,right=l+pw*.54f,col=pw*.42f,gap=pw*.025f,row=ph*.115f,y1=t+ph*.165f,y2=t+ph*.330f,y3=t+ph*.495f,y4=t+ph*.660f;makePair(sensMinus,sensPlus,left,y1,col,row,gap);makePair(aimSensMinus,aimSensPlus,right,y1,col,row,gap);gyroModeToggle.set(left,y2,left+col,y2+row);makePair(gyroSensMinus,gyroSensPlus,right,y2,col,row,gap);makePair(gyroAimMinus,gyroAimPlus,left,y3,col,row,gap);makePair(scaleMinus,scalePlus,right,y3,col,row,gap);makePair(alphaMinus,alphaPlus,left,y4,col,row,gap);padToggle.set(right,y4,right+col,y4+row);}else{float left=l+pw*.06f,right=l+pw*.54f,bw=pw*.40f,bh=ph*.18f,y1=t+ph*.22f,y2=t+ph*.52f;aspectToggle.set(left,y1,left+bw,y1+bh);renderToggle.set(right,y1,right+bw,y1+bh);msaaToggle.set(left,y2,left+bw,y2+bh);filterToggle.set(right,y2,right+bw,y2+bh);}}
-    private static void makePair(RectF a,RectF b,float x,float y,float width,float height,float gap){float bw=(width-gap)*.5f;a.set(x,y,x+bw,y+height);b.set(x+bw+gap,y,x+width,y+height);} private static void setCircle(RectF r,float cx,float cy,float rad){r.set(cx-rad,cy-rad,cx+rad,cy+rad);} private boolean hit(RectF r,float x,float y){return r.contains(x,y);} private boolean aiming(){return(buttons&AIM)!=0;}
-    private void pushState(){float lx=settings?0f:clamp(touchLookX+gyroLookX,-1f,1f),ly=settings?0f:clamp(touchLookY+gyroLookY,-1f,1f);nativeSetTouchState(moveX,moveY,lx,ly,buttons);}
-
-    private final Runnable lookPump=new Runnable(){@Override public void run(){if(Math.abs(lookImpulseX)<.004f&&Math.abs(lookImpulseY)<.004f){lookImpulseX=lookImpulseY=touchLookX=touchLookY=0f;lookPumpRunning=false;pushState();return;}touchLookX=clamp(lookImpulseX,-1f,1f);touchLookY=clamp(lookImpulseY,-1f,1f);lookImpulseX-=touchLookX*.46f;lookImpulseY-=touchLookY*.46f;pushState();handler.postDelayed(this,16);}};
-    private void ensureLookPump(){if(!lookPumpRunning){lookPumpRunning=true;handler.post(lookPump);}}
-
-    private int roleForDown(float x,float y){if(physicalGamepad&&hideOnGamepad&&!settings)return hit(gear,x,y)?ROLE_SETTINGS:ROLE_NONE;if(hit(gear,x,y))return ROLE_SETTINGS;if(settings)return ROLE_NONE;if(hit(fire,x,y))return ROLE_FIRE;if(hit(aim,x,y))return ROLE_AIM;if(hit(action,x,y))return ROLE_ACTION;if(hit(weapon,x,y))return ROLE_WEAPON;if(hit(crouch,x,y))return ROLE_CROUCH;if(hit(start,x,y))return ROLE_START;if(x<getWidth()*.47f&&y>getHeight()*.22f&&movePointer<0)return ROLE_MOVE;if(x>=getWidth()*.40f&&lookPointer<0)return ROLE_LOOK;return ROLE_NONE;}
-    private int bitForRole(int role){switch(role){case ROLE_FIRE:return FIRE;case ROLE_AIM:return AIM;case ROLE_ACTION:return ACTION;case ROLE_WEAPON:return WEAPON;case ROLE_CROUCH:return CROUCH;case ROLE_START:return START;default:return 0;}}
-    private void setButtonRole(int role,boolean down){int bit=bitForRole(role);if(bit==0)return;if(down){buttons|=bit;performHapticFeedback(HapticFeedbackConstants.KEYBOARD_TAP);}else{buttons&=~bit;if(bit==AIM&&gyroMode==GYRO_AIM)gyroLookX=gyroLookY=gyroFilteredX=gyroFilteredY=0f;}pushState();invalidate();}
-
-    private void updateMove(float x,float y){float rad=Math.min(getWidth(),getHeight())*.115f*controlScale,dx=x-moveCx,dy=y-moveCy,len=(float)Math.hypot(dx,dy);if(len>rad){dx*=rad/len;dy*=rad/len;}float dead=.09f,nx=dx/rad,ny=-dy/rad,mag=(float)Math.hypot(nx,ny);if(mag<dead)nx=ny=0;else if(mag>0){float s=(mag-dead)/(1-dead)/mag;nx*=s;ny*=s;}moveX=clamp(nx,-1,1);moveY=clamp(ny,-1,1);pushState();invalidate();}
-    private void updateLook(float x,float y){float dx=x-lookLastX,dy=y-lookLastY;lookLastX=x;lookLastY=y;float sens=aiming()?aimSensitivity:touchSensitivity,base=Math.max(dp(26),Math.min(getWidth(),getHeight())*.040f);lookImpulseX=clamp(lookImpulseX+(dx/base)*sens,-3f,3f);lookImpulseY=clamp(lookImpulseY+(-dy/base)*sens,-3f,3f);ensureLookPump();}
-
-    @Override public void onSensorChanged(SensorEvent e){if(e.sensor.getType()!=Sensor.TYPE_GYROSCOPE)return;boolean active=gyroMode==GYRO_ALWAYS||(gyroMode==GYRO_AIM&&aiming());if(!active||settings){if(gyroLookX!=0f||gyroLookY!=0f){gyroLookX=gyroLookY=gyroFilteredX=gyroFilteredY=0f;pushState();}return;}float gx=e.values[0],gy=e.values[1],sx,sy;int rot=getDisplay()!=null?getDisplay().getRotation():Surface.ROTATION_0;switch(rot){case Surface.ROTATION_90:sx=gy;sy=-gx;break;case Surface.ROTATION_180:sx=-gx;sy=-gy;break;case Surface.ROTATION_270:sx=-gy;sy=gx;break;default:sx=gx;sy=gy;}if(Math.abs(sy)<.012f)sy=0f;if(Math.abs(sx)<.012f)sx=0f;float sens=aiming()?gyroAimSensitivity:gyroSensitivity,targetX=clamp(-sy*.72f*sens,-1f,1f),targetY=clamp(-sx*.72f*sens,-1f,1f);gyroFilteredX+=(targetX-gyroFilteredX)*.42f;gyroFilteredY+=(targetY-gyroFilteredY)*.42f;gyroLookX=Math.abs(gyroFilteredX)<.004f?0f:gyroFilteredX;gyroLookY=Math.abs(gyroFilteredY)<.004f?0f:gyroFilteredY;pushState();}
-    @Override public void onAccuracyChanged(Sensor sensor,int accuracy){}
-
-    @Override public boolean onTouchEvent(MotionEvent e){layoutControls();int ai=e.getActionIndex(),id=e.getPointerId(ai);switch(e.getActionMasked()){case MotionEvent.ACTION_DOWN:case MotionEvent.ACTION_POINTER_DOWN:{float x=e.getX(ai),y=e.getY(ai);if(settings){if(hit(gear,x,y)){settings=false;pushState();invalidate();return true;}if(hit(controlsTab,x,y)){settingsPage=SETTINGS_CONTROLS;invalidate();return true;}if(hit(videoTab,x,y)){settingsPage=SETTINGS_VIDEO;invalidate();return true;}if(settingsPage==SETTINGS_CONTROLS){if(hit(sensMinus,x,y))touchSensitivity=clamp(touchSensitivity-.10f,.25f,4f);else if(hit(sensPlus,x,y))touchSensitivity=clamp(touchSensitivity+.10f,.25f,4f);else if(hit(aimSensMinus,x,y))aimSensitivity=clamp(aimSensitivity-.10f,.25f,4f);else if(hit(aimSensPlus,x,y))aimSensitivity=clamp(aimSensitivity+.10f,.25f,4f);else if(hit(gyroModeToggle,x,y)){gyroMode=(gyroMode+1)%3;updateGyroRegistration();}else if(hit(gyroSensMinus,x,y))gyroSensitivity=clamp(gyroSensitivity-.10f,.10f,3f);else if(hit(gyroSensPlus,x,y))gyroSensitivity=clamp(gyroSensitivity+.10f,.10f,3f);else if(hit(gyroAimMinus,x,y))gyroAimSensitivity=clamp(gyroAimSensitivity-.10f,.10f,3f);else if(hit(gyroAimPlus,x,y))gyroAimSensitivity=clamp(gyroAimSensitivity+.10f,.10f,3f);else if(hit(alphaMinus,x,y))opacity=clamp(opacity-.08f,.15f,.90f);else if(hit(alphaPlus,x,y))opacity=clamp(opacity+.08f,.15f,.90f);else if(hit(scaleMinus,x,y))controlScale=clamp(controlScale-.08f,.70f,1.45f);else if(hit(scalePlus,x,y))controlScale=clamp(controlScale+.08f,.70f,1.45f);else if(hit(padToggle,x,y))hideOnGamepad=!hideOnGamepad;save();}else{if(hit(aspectToggle,x,y))videoAspect=(videoAspect+1)%3;else if(hit(renderToggle,x,y))renderScaleIndex=(renderScaleIndex+1)%3;else if(hit(msaaToggle,x,y))msaaIndex=(msaaIndex+1)%3;else if(hit(filterToggle,x,y))filterIndex=(filterIndex+1)%2;save();applyVideoSettings();}invalidate();return true;}int role=roleForDown(x,y);roles.put(id,role);if(role==ROLE_SETTINGS){settings=true;touchLookX=touchLookY=lookImpulseX=lookImpulseY=gyroLookX=gyroLookY=0f;pushState();invalidate();return true;}if(role==ROLE_MOVE){movePointer=id;moveCx=x;moveCy=y;updateMove(x,y);}else if(role==ROLE_LOOK){lookPointer=id;lookLastX=x;lookLastY=y;}else setButtonRole(role,true);return true;}case MotionEvent.ACTION_MOVE:for(int i=0;i<e.getPointerCount();i++){int pid=e.getPointerId(i),role=roles.get(pid,ROLE_NONE);if(role==ROLE_MOVE&&pid==movePointer)updateMove(e.getX(i),e.getY(i));else if(role==ROLE_LOOK&&pid==lookPointer)updateLook(e.getX(i),e.getY(i));}return true;case MotionEvent.ACTION_UP:case MotionEvent.ACTION_POINTER_UP:case MotionEvent.ACTION_CANCEL:{int role=roles.get(id,ROLE_NONE);if(role==ROLE_MOVE&&id==movePointer){movePointer=-1;moveX=moveY=0;pushState();}else if(role==ROLE_LOOK&&id==lookPointer)lookPointer=-1;else setButtonRole(role,false);roles.delete(id);invalidate();return true;}}return true;}
-
-    public void releaseAll(){roles.clear();movePointer=lookPointer=-1;moveX=moveY=touchLookX=touchLookY=gyroLookX=gyroLookY=0f;lookImpulseX=lookImpulseY=gyroFilteredX=gyroFilteredY=0f;buttons=0;handler.removeCallbacks(lookPump);lookPumpRunning=false;nativeClearTouchState();invalidate();}
-    private void save(){prefs.edit().putFloat("touchSensitivity",touchSensitivity).putFloat("aimSensitivity",aimSensitivity).putInt("gyroMode",gyroMode).putFloat("gyroSensitivity",gyroSensitivity).putFloat("gyroAimSensitivity",gyroAimSensitivity).putFloat("opacity",opacity).putFloat("scale",controlScale).putBoolean("hideOnGamepad",hideOnGamepad).putInt("videoAspect",videoAspect).putInt("renderScaleIndex",renderScaleIndex).putInt("msaaIndex",msaaIndex).putInt("filterIndex",filterIndex).apply();}
-    private float renderScaleValue(){return renderScaleIndex==2?2f:(renderScaleIndex==1?1.5f:1f);}private int msaaValue(){return msaaIndex==2?4:(msaaIndex==1?2:1);}private String aspectName(){return videoAspect==0?"4:3":(videoAspect==1?"16:9":"TELA");}private String renderName(){return renderScaleIndex==0?"1.0×":(renderScaleIndex==1?"1.5×":"2.0×");}private String msaaName(){return msaaIndex==0?"OFF":(msaaIndex==1?"2×":"4×");}private String filterName(){return filterIndex==0?"N64":"BILINEAR";}private String gyroModeName(){if(gyroSensor==null)return"SEM SENSOR";return gyroMode==GYRO_OFF?"DESLIGADO":(gyroMode==GYRO_AIM?"SÓ MIRA":"SEMPRE");}private void applyVideoSettings(){nativeSetVideoSettings(videoAspect,renderScaleValue(),msaaValue(),filterIndex);}
-    private void circle(Canvas c,RectF r,String label,boolean active){int a=(int)(255f*opacity*(active?1f:.72f));fill.setARGB(a,active?235:25,active?235:25,active?235:25);line.setARGB((int)(255f*opacity),255,255,255);c.drawOval(r,fill);c.drawOval(r,line);text.setARGB((int)(255f*opacity),255,255,255);text.setTextSize(Math.max(dp(11),r.height()*.19f));c.drawText(label,r.centerX(),r.centerY()-((text.ascent()+text.descent())/2),text);}private boolean on(int bit){return(buttons&bit)!=0;}
-    @Override protected void onDraw(Canvas c){super.onDraw(c);layoutControls();if(physicalGamepad&&hideOnGamepad&&!settings){circle(c,gear,"TOUCH",false);return;}float stickR=Math.min(getWidth(),getHeight())*.115f*controlScale,cx=movePointer>=0?moveCx:getWidth()*.155f,cy=movePointer>=0?moveCy:getHeight()*.74f;fill.setARGB((int)(255*opacity*.35f),20,20,20);line.setARGB((int)(255*opacity),255,255,255);c.drawCircle(cx,cy,stickR,fill);c.drawCircle(cx,cy,stickR,line);c.drawCircle(cx+moveX*stickR,cy-moveY*stickR,stickR*.42f,fill);c.drawCircle(cx+moveX*stickR,cy-moveY*stickR,stickR*.42f,line);circle(c,fire,"TIRO",on(FIRE));circle(c,aim,"MIRA",on(AIM));circle(c,action,"AÇÃO",on(ACTION));circle(c,weapon,"ARMA",on(WEAPON));circle(c,crouch,"AGACH.",on(CROUCH));circle(c,start,"II",on(START));circle(c,gear,"⚙",settings);if(settings)drawSettings(c);}
-    private void drawSettings(Canvas c){fill.setARGB(232,12,12,12);c.drawRoundRect(settingsPanel,dp(12),dp(12),fill);mini(c,controlsTab,settingsPage==SETTINGS_CONTROLS?"CONTROLES ✓":"CONTROLES");mini(c,videoTab,settingsPage==SETTINGS_VIDEO?"VÍDEO ✓":"VÍDEO");text.setARGB(255,255,255,255);float l=settingsPanel.left,t=settingsPanel.top,pw=settingsPanel.width(),ph=settingsPanel.height();if(settingsPage==SETTINGS_CONTROLS){text.setTextSize(dp(12));label(c,"CÂMERA TOUCH  "+String.format("%.2f",touchSensitivity),l+pw*.25f,t+ph*.145f);label(c,"MIRA TOUCH  "+String.format("%.2f",aimSensitivity),l+pw*.75f,t+ph*.145f);mini(c,sensMinus,"−");mini(c,sensPlus,"+");mini(c,aimSensMinus,"−");mini(c,aimSensPlus,"+");label(c,"GIROSCÓPIO",l+pw*.25f,t+ph*.310f);label(c,"SENS. GIRO  "+String.format("%.2f",gyroSensitivity),l+pw*.75f,t+ph*.310f);mini(c,gyroModeToggle,gyroModeName());mini(c,gyroSensMinus,"−");mini(c,gyroSensPlus,"+");label(c,"GIRO MIRA  "+String.format("%.2f",gyroAimSensitivity),l+pw*.25f,t+ph*.475f);label(c,"TAMANHO",l+pw*.75f,t+ph*.475f);mini(c,gyroAimMinus,"−");mini(c,gyroAimPlus,"+");mini(c,scaleMinus,"−");mini(c,scalePlus,"+");label(c,"OPACIDADE",l+pw*.25f,t+ph*.640f);label(c,"GAMEPAD",l+pw*.75f,t+ph*.640f);mini(c,alphaMinus,"−");mini(c,alphaPlus,"+");mini(c,padToggle,hideOnGamepad?"AUTO-HIDE":"SEMPRE");}else{text.setTextSize(dp(13));label(c,"PROPORÇÃO",l+pw*.26f,t+ph*.190f);label(c,"RESOLUÇÃO",l+pw*.74f,t+ph*.190f);mini(c,aspectToggle,"ASPECTO  "+aspectName());mini(c,renderToggle,"RESOL.  "+renderName());label(c,"ANTI-ALIASING",l+pw*.26f,t+ph*.490f);label(c,"TEXTURAS",l+pw*.74f,t+ph*.490f);mini(c,msaaToggle,"MSAA  "+msaaName());mini(c,filterToggle,"FILTRO  "+filterName());}}
-    private void label(Canvas c,String s,float x,float y){c.drawText(s,x,y,text);}private void mini(Canvas c,RectF r,String s){fill.setARGB(230,55,55,55);c.drawRoundRect(r,dp(7),dp(7),fill);text.setTextSize(dp(13));c.drawText(s,r.centerX(),r.centerY()-((text.ascent()+text.descent())/2),text);}
-    private static native void nativeSetTouchState(float moveX,float moveY,float lookX,float lookY,int buttons);private static native void nativeClearTouchState();private static native void nativeSetVideoSettings(int aspectMode,float renderScale,int msaa,int filterMode);
-}
-'''
-(root/'android/app/src/main/java/com/gevr/port/TouchOverlayView.java').write_text(overlay_src)
-
-main=root/'android/app/src/main/java/com/gevr/port/MainActivity.java'
-s=main.read_text()
-old='''    @Override protected void onResume() {
-        super.onResume();
-        if (nativeReady) nativeAudioResume();
-    }
-
-    @Override protected void onPause() {
-        if (overlay != null) overlay.releaseAll();
-        if (nativeReady) nativeAudioPause();
-        super.onPause();
-    }'''
-new='''    @Override protected void onResume() {
-        super.onResume();
-        if (overlay != null) overlay.onHostResume();
-        if (nativeReady) nativeAudioResume();
-    }
-
-    @Override protected void onPause() {
-        if (overlay != null) {
-            overlay.onHostPause();
-            overlay.releaseAll();
-        }
-        if (nativeReady) nativeAudioPause();
-        super.onPause();
-    }'''
-if old not in s: raise SystemExit('MainActivity lifecycle anchor not found')
-main.write_text(s.replace(old,new,1))
-manifest=root/'android/app/src/main/AndroidManifest.xml'
-m=manifest.read_text(); needle='    <uses-feature android:glEsVersion="0x00030000" android:required="true" />'
-if needle not in m: raise SystemExit('manifest GLES anchor not found')
-manifest.write_text(m.replace(needle,needle+'\n    <uses-feature android:name="android.hardware.sensor.gyroscope" android:required="false" />',1))
-print('v7 applied')
-PYV7
+          cat > /tmp/apply_v7.py.gz.b64 <<'B64'
+          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
+          B64
+          tr -d '[:space:]' < /tmp/apply_v7.py.gz.b64 | base64 -d | gzip -d > /tmp/apply_v7.py
           python3 /tmp/apply_v7.py
 
       - name: Install Android NDK and CMake
@@ -228,16 +164,19 @@ PYV7
           apk='upstream/android/app/build/outputs/apk/debug/app-debug.apk'
           with zipfile.ZipFile(apk) as z:
               i=z.getinfo('assets/ge.z64')
-              assert i.file_size == 12*1024*1024
-              assert i.compress_type == zipfile.ZIP_STORED
-              assert 'lib/arm64-v8a/libgevr.so' in z.namelist()
-          print('v7 skeleton verified')
+              assert i.file_size == 12*1024*1024, i.file_size
+              assert i.compress_type == zipfile.ZIP_STORED, i.compress_type
+              names=set(z.namelist())
+              assert 'lib/arm64-v8a/libgevr.so' in names
+              assert 'lib/arm64-v8a/libSDL2.so' in names
+              print('v7 skeleton OK', i.file_size)
           PY
           mkdir -p /tmp/geflat-output
           cp "$APK" /tmp/geflat-output/GoldenEye007-Android-ARM64-skeleton-v7.apk
           cp "$ANDROID_HOME/build-tools/34.0.0/lib/apksigner.jar" /tmp/geflat-output/apksigner.jar
           test -f "$HOME/.android/debug.keystore"
           cp "$HOME/.android/debug.keystore" /tmp/geflat-output/goldeneye-v7.keystore
+          sha256sum "$APK"
 
       - name: Upload signing skeleton
         uses: actions/upload-artifact@v4
