@@ -31,6 +31,13 @@ jobs:
 
       - name: Apply smartphone flat port
         run: |
+          python3 - <<'PY'
+          from pathlib import Path
+          p = Path('/tmp/geflat-kit/GoldenEyeAndroidFlatPort_CI/tools/apply_flat_port.py')
+          s = p.read_text()
+          s = s.replace('#ifndef ANDROID // if PC', '#ifndef ANDROID')
+          p.write_text(s)
+          PY
           python3 /tmp/geflat-kit/GoldenEyeAndroidFlatPort_CI/tools/apply_flat_port.py "$GITHUB_WORKSPACE/upstream"
 
       - name: Install Android NDK and CMake
