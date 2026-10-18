@@ -1,0 +1,58 @@
+name: Inspect Flat v6 Generated
+
+on:
+  push:
+    branches: [chatgpt-goldeneye-apk]
+    paths:
+      - '.github/workflows/inspect-flat-v6-generated.yml'
+  workflow_dispatch:
+
+jobs:
+  inspect:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: chatgpt-goldeneye-apk
+      - name: Reassemble kit and v6
+        run: |
+          cat geflat/kit.part* | base64 -d > /tmp/geflat-kit.zip
+          mkdir -p /tmp/geflat-kit
+          unzip -q /tmp/geflat-kit.zip -d /tmp/geflat-kit
+          git clone --depth 1 --branch v0.5.6 https://github.com/MrSco/goldeneye-vr.git upstream
+          python3 - <<'PY'
+          from pathlib import Path
+          import re, textwrap, base64, gzip
+          y4 = Path('.github/workflows/goldeneye-flat-android-v4.yml').read_text()
+          b4 = re.findall(r"          python3 - <<'PY'\n(.*?)\n          PY", y4, flags=re.S)
+          Path('/tmp/v4_pre.py').write_text(textwrap.dedent(b4[0])); Path('/tmp/v4_post.py').write_text(textwrap.dedent(b4[1]))
+          y5 = Path('.github/workflows/goldeneye-flat-android-v5.yml').read_text()
+          b5 = re.findall(r"          python3 - <<'PY'\n(.*?)\n          PY", y5, flags=re.S)
+          Path('/tmp/v5.py').write_text(textwrap.dedent(b5[1]))
+          y6 = Path('.github/workflows/goldeneye-flat-android-v6.yml').read_text()
+          m = re.search(r"cat > /tmp/apply_v6\.py\.gz\.b64 <<'B64'\n(.*?)\n          B64", y6, flags=re.S)
+          if not m: raise SystemExit('v6 payload not found')
+          payload = ''.join(line.strip() for line in m.group(1).splitlines())
+          Path('/tmp/apply_v6.py').write_bytes(gzip.decompress(base64.b64decode(payload)))
+          PY
+          python3 /tmp/v4_pre.py
+          python3 /tmp/geflat-kit/GoldenEyeAndroidFlatPort_CI/tools/apply_flat_port.py "$GITHUB_WORKSPACE/upstream"
+          python3 /tmp/v4_post.py
+          python3 /tmp/v5.py
+          python3 /tmp/apply_v6.py
+      - name: Collect v6 sources
+        run: |
+          mkdir -p /tmp/inspect-v6
+          cp upstream/android/app/src/main/java/com/gevr/port/MainActivity.java /tmp/inspect-v6/
+          cp upstream/android/app/src/main/java/com/gevr/port/TouchControls.java /tmp/inspect-v6/ || true
+          cp upstream/android/app/src/main/java/com/gevr/port/TouchControlOverlay.java /tmp/inspect-v6/ || true
+          cp upstream/android/app/src/main/AndroidManifest.xml /tmp/inspect-v6/
+          cp upstream/port/src/input.c /tmp/inspect-v6/input.c
+          cp upstream/port/src/video.c /tmp/inspect-v6/video.c
+          cp upstream/port/fast3d/gfx_pc.cpp /tmp/inspect-v6/gfx_pc.cpp
+          grep -R "nativeTouch\|nativeStick\|nativeButton\|TouchControl\|videoQuality\|quality\|sensitivity" -n upstream/android upstream/port/src > /tmp/inspect-v6/grep.txt || true
+      - uses: actions/upload-artifact@v4
+        with:
+          name: flat-v6-generated-sources
+          path: /tmp/inspect-v6
+          retention-days: 1
