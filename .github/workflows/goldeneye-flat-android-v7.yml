@@ -1,0 +1,248 @@
+name: GoldenEye Flat Android v7
+
+on:
+  push:
+    branches: [chatgpt-goldeneye-apk]
+    paths:
+      - '.github/workflows/goldeneye-flat-android-v7.yml'
+  workflow_dispatch:
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    steps:
+      - name: Checkout build harness
+        uses: actions/checkout@v4
+        with:
+          ref: chatgpt-goldeneye-apk
+
+      - name: Reassemble flat-port kit
+        run: |
+          cat geflat/kit.part* | base64 -d > /tmp/geflat-kit.zip
+          mkdir -p /tmp/geflat-kit
+          unzip -q /tmp/geflat-kit.zip -d /tmp/geflat-kit
+
+      - name: Checkout GoldenEye VR v0.5.6
+        run: |
+          git clone --depth 1 --branch v0.5.6 https://github.com/MrSco/goldeneye-vr.git upstream
+
+      - name: Reuse v4 v5 v6 working base
+        run: |
+          python3 - <<'PYBASE'
+          from pathlib import Path
+          import re, textwrap, base64, gzip
+          y4=Path('.github/workflows/goldeneye-flat-android-v4.yml').read_text()
+          b4=re.findall(r"          python3 - <<'PY'\n(.*?)\n          PY",y4,flags=re.S)
+          if len(b4)<2: raise SystemExit(f'v4 blocks: {len(b4)}')
+          Path('/tmp/v4_pre.py').write_text(textwrap.dedent(b4[0])); Path('/tmp/v4_post.py').write_text(textwrap.dedent(b4[1]))
+          y5=Path('.github/workflows/goldeneye-flat-android-v5.yml').read_text()
+          b5=re.findall(r"          python3 - <<'PY'\n(.*?)\n          PY",y5,flags=re.S)
+          if len(b5)<2: raise SystemExit(f'v5 blocks: {len(b5)}')
+          Path('/tmp/v5.py').write_text(textwrap.dedent(b5[1]))
+          y6=Path('.github/workflows/goldeneye-flat-android-v6.yml').read_text()
+          m=re.search(r"cat > /tmp/apply_v6\.py\.gz\.b64 <<'B64'\n(.*?)\n          B64",y6,flags=re.S)
+          if not m: raise SystemExit('v6 payload not found')
+          payload=''.join(line.strip() for line in m.group(1).splitlines())
+          Path('/tmp/apply_v6.py').write_bytes(gzip.decompress(base64.b64decode(payload)))
+          PYBASE
+          python3 /tmp/v4_pre.py
+          python3 /tmp/geflat-kit/GoldenEyeAndroidFlatPort_CI/tools/apply_flat_port.py "$GITHUB_WORKSPACE/upstream"
+          python3 /tmp/v4_post.py
+          python3 /tmp/v5.py
+          python3 /tmp/apply_v6.py
+
+      - name: Apply v7 gyro and camera input patch
+        run: |
+          cat > /tmp/apply_v7.py <<'PYV7'
+from pathlib import Path
+root = Path('upstream')
+
+overlay_src = r'''package com.gevr.port;
+
+import android.content.Context;
+import android.content.SharedPreferences;
+import android.graphics.Canvas;
+import android.graphics.Paint;
+import android.graphics.RectF;
+import android.hardware.Sensor;
+import android.hardware.SensorEvent;
+import android.hardware.SensorEventListener;
+import android.hardware.SensorManager;
+import android.hardware.input.InputManager;
+import android.os.Handler;
+import android.os.Looper;
+import android.view.HapticFeedbackConstants;
+import android.view.InputDevice;
+import android.view.MotionEvent;
+import android.view.Surface;
+import android.view.View;
+import android.util.SparseIntArray;
+
+public final class TouchOverlayView extends View implements InputManager.InputDeviceListener, SensorEventListener {
+    public static final int FIRE=1<<0, AIM=1<<1, ACTION=1<<2, WEAPON=1<<3, CROUCH=1<<4, START=1<<5;
+    private static final int ROLE_NONE=0, ROLE_MOVE=1, ROLE_LOOK=2, ROLE_FIRE=3, ROLE_AIM=4, ROLE_ACTION=5, ROLE_WEAPON=6, ROLE_CROUCH=7, ROLE_START=8, ROLE_SETTINGS=9;
+    private static final int SETTINGS_CONTROLS=0, SETTINGS_VIDEO=1;
+    private static final int GYRO_OFF=0, GYRO_AIM=1, GYRO_ALWAYS=2;
+
+    private final Paint fill=new Paint(Paint.ANTI_ALIAS_FLAG), line=new Paint(Paint.ANTI_ALIAS_FLAG), text=new Paint(Paint.ANTI_ALIAS_FLAG);
+    private final SparseIntArray roles=new SparseIntArray();
+    private final Handler handler=new Handler(Looper.getMainLooper());
+    private final InputManager inputManager;
+    private final SharedPreferences prefs;
+    private final SensorManager sensorManager;
+    private final Sensor gyroSensor;
+
+    private float moveX,moveY,touchLookX,touchLookY,gyroLookX,gyroLookY,lookImpulseX,lookImpulseY;
+    private int buttons,movePointer=-1,lookPointer=-1;
+    private float moveCx,moveCy,lookLastX,lookLastY;
+    private boolean lookPumpRunning,settings,hideOnGamepad=true,physicalGamepad,gyroRegistered;
+    private int settingsPage=SETTINGS_CONTROLS;
+    private float touchSensitivity,aimSensitivity,gyroSensitivity,gyroAimSensitivity,gyroFilteredX,gyroFilteredY,opacity,controlScale;
+    private int gyroMode;
+    private int videoAspect,renderScaleIndex,msaaIndex,filterIndex;
+
+    private final RectF fire=new RectF(),aim=new RectF(),action=new RectF(),weapon=new RectF(),crouch=new RectF(),start=new RectF(),gear=new RectF();
+    private final RectF settingsPanel=new RectF(),controlsTab=new RectF(),videoTab=new RectF();
+    private final RectF sensMinus=new RectF(),sensPlus=new RectF(),aimSensMinus=new RectF(),aimSensPlus=new RectF(),gyroModeToggle=new RectF();
+    private final RectF gyroSensMinus=new RectF(),gyroSensPlus=new RectF(),gyroAimMinus=new RectF(),gyroAimPlus=new RectF();
+    private final RectF scaleMinus=new RectF(),scalePlus=new RectF(),alphaMinus=new RectF(),alphaPlus=new RectF(),padToggle=new RectF();
+    private final RectF aspectToggle=new RectF(),renderToggle=new RectF(),msaaToggle=new RectF(),filterToggle=new RectF();
+
+    public TouchOverlayView(Context context){
+        super(context); setWillNotDraw(false); setFocusable(false);
+        prefs=context.getSharedPreferences("touch-controls",Context.MODE_PRIVATE);
+        float old=prefs.getFloat("sensitivity",1.15f);
+        touchSensitivity=prefs.getFloat("touchSensitivity",Math.max(1.25f,old));
+        aimSensitivity=prefs.getFloat("aimSensitivity",1.60f);
+        gyroMode=prefs.getInt("gyroMode",GYRO_ALWAYS);
+        gyroSensitivity=prefs.getFloat("gyroSensitivity",1.00f);
+        gyroAimSensitivity=prefs.getFloat("gyroAimSensitivity",0.85f);
+        opacity=prefs.getFloat("opacity",0.54f); controlScale=prefs.getFloat("scale",1.0f); hideOnGamepad=prefs.getBoolean("hideOnGamepad",true);
+        videoAspect=prefs.getInt("videoAspect",1); renderScaleIndex=prefs.getInt("renderScaleIndex",0); msaaIndex=prefs.getInt("msaaIndex",1); filterIndex=prefs.getInt("filterIndex",1);
+        applyVideoSettings();
+        inputManager=(InputManager)context.getSystemService(Context.INPUT_SERVICE); inputManager.registerInputDeviceListener(this,handler); refreshGamepadState();
+        sensorManager=(SensorManager)context.getSystemService(Context.SENSOR_SERVICE); gyroSensor=sensorManager!=null?sensorManager.getDefaultSensor(Sensor.TYPE_GYROSCOPE):null;
+        line.setStyle(Paint.Style.STROKE); line.setStrokeWidth(dp(2)); text.setTextAlign(Paint.Align.CENTER); text.setFakeBoldText(true);
+    }
+
+    @Override protected void onDetachedFromWindow(){inputManager.unregisterInputDeviceListener(this);onHostPause();nativeClearTouchState();super.onDetachedFromWindow();}
+    public void onHostResume(){updateGyroRegistration();}
+    public void onHostPause(){if(sensorManager!=null&&gyroRegistered){sensorManager.unregisterListener(this);gyroRegistered=false;}gyroLookX=gyroLookY=gyroFilteredX=gyroFilteredY=0f;pushState();}
+    private void updateGyroRegistration(){if(sensorManager==null||gyroSensor==null)return;if(gyroMode==GYRO_OFF){if(gyroRegistered)sensorManager.unregisterListener(this);gyroRegistered=false;gyroLookX=gyroLookY=gyroFilteredX=gyroFilteredY=0f;pushState();}else if(!gyroRegistered){gyroRegistered=sensorManager.registerListener(this,gyroSensor,SensorManager.SENSOR_DELAY_GAME);}}
+
+    private float dp(float v){return v*getResources().getDisplayMetrics().density;} private float clamp(float v,float lo,float hi){return Math.max(lo,Math.min(hi,v));}
+    private boolean isGamepad(InputDevice d){if(d==null||d.isVirtual())return false;int s=d.getSources();return(s&InputDevice.SOURCE_GAMEPAD)==InputDevice.SOURCE_GAMEPAD||(s&InputDevice.SOURCE_JOYSTICK)==InputDevice.SOURCE_JOYSTICK;}
+    private void refreshGamepadState(){physicalGamepad=false;for(int id:InputDevice.getDeviceIds())if(isGamepad(InputDevice.getDevice(id))){physicalGamepad=true;break;}invalidate();}
+    @Override public void onInputDeviceAdded(int id){refreshGamepadState();}@Override public void onInputDeviceRemoved(int id){refreshGamepadState();}@Override public void onInputDeviceChanged(int id){refreshGamepadState();}
+
+    private void layoutControls(){
+        float w=getWidth(),h=getHeight(),r=Math.min(w,h)*.082f*controlScale;
+        setCircle(fire,w*.895f,h*.625f,r*1.12f);setCircle(aim,w*.765f,h*.725f,r*.86f);setCircle(action,w*.895f,h*.835f,r*.88f);setCircle(weapon,w*.952f,h*.405f,r*.72f);setCircle(crouch,w*.650f,h*.850f,r*.73f);setCircle(start,w*.900f,h*.105f,r*.48f);setCircle(gear,w*.965f,h*.105f,r*.42f);
+        if(!settings)return;settingsPanel.set(w*.405f,h*.025f,w*.987f,h*.975f);float l=settingsPanel.left,t=settingsPanel.top,pw=settingsPanel.width(),ph=settingsPanel.height();
+        controlsTab.set(l+pw*.025f,t+ph*.025f,l+pw*.475f,t+ph*.105f);videoTab.set(l+pw*.525f,t+ph*.025f,l+pw*.975f,t+ph*.105f);
+        if(settingsPage==SETTINGS_CONTROLS){float left=l+pw*.04f,right=l+pw*.54f,col=pw*.42f,gap=pw*.025f,row=ph*.115f,y1=t+ph*.165f,y2=t+ph*.330f,y3=t+ph*.495f,y4=t+ph*.660f;makePair(sensMinus,sensPlus,left,y1,col,row,gap);makePair(aimSensMinus,aimSensPlus,right,y1,col,row,gap);gyroModeToggle.set(left,y2,left+col,y2+row);makePair(gyroSensMinus,gyroSensPlus,right,y2,col,row,gap);makePair(gyroAimMinus,gyroAimPlus,left,y3,col,row,gap);makePair(scaleMinus,scalePlus,right,y3,col,row,gap);makePair(alphaMinus,alphaPlus,left,y4,col,row,gap);padToggle.set(right,y4,right+col,y4+row);}else{float left=l+pw*.06f,right=l+pw*.54f,bw=pw*.40f,bh=ph*.18f,y1=t+ph*.22f,y2=t+ph*.52f;aspectToggle.set(left,y1,left+bw,y1+bh);renderToggle.set(right,y1,right+bw,y1+bh);msaaToggle.set(left,y2,left+bw,y2+bh);filterToggle.set(right,y2,right+bw,y2+bh);}}
+    private static void makePair(RectF a,RectF b,float x,float y,float width,float height,float gap){float bw=(width-gap)*.5f;a.set(x,y,x+bw,y+height);b.set(x+bw+gap,y,x+width,y+height);} private static void setCircle(RectF r,float cx,float cy,float rad){r.set(cx-rad,cy-rad,cx+rad,cy+rad);} private boolean hit(RectF r,float x,float y){return r.contains(x,y);} private boolean aiming(){return(buttons&AIM)!=0;}
+    private void pushState(){float lx=settings?0f:clamp(touchLookX+gyroLookX,-1f,1f),ly=settings?0f:clamp(touchLookY+gyroLookY,-1f,1f);nativeSetTouchState(moveX,moveY,lx,ly,buttons);}
+
+    private final Runnable lookPump=new Runnable(){@Override public void run(){if(Math.abs(lookImpulseX)<.004f&&Math.abs(lookImpulseY)<.004f){lookImpulseX=lookImpulseY=touchLookX=touchLookY=0f;lookPumpRunning=false;pushState();return;}touchLookX=clamp(lookImpulseX,-1f,1f);touchLookY=clamp(lookImpulseY,-1f,1f);lookImpulseX-=touchLookX*.46f;lookImpulseY-=touchLookY*.46f;pushState();handler.postDelayed(this,16);}};
+    private void ensureLookPump(){if(!lookPumpRunning){lookPumpRunning=true;handler.post(lookPump);}}
+
+    private int roleForDown(float x,float y){if(physicalGamepad&&hideOnGamepad&&!settings)return hit(gear,x,y)?ROLE_SETTINGS:ROLE_NONE;if(hit(gear,x,y))return ROLE_SETTINGS;if(settings)return ROLE_NONE;if(hit(fire,x,y))return ROLE_FIRE;if(hit(aim,x,y))return ROLE_AIM;if(hit(action,x,y))return ROLE_ACTION;if(hit(weapon,x,y))return ROLE_WEAPON;if(hit(crouch,x,y))return ROLE_CROUCH;if(hit(start,x,y))return ROLE_START;if(x<getWidth()*.47f&&y>getHeight()*.22f&&movePointer<0)return ROLE_MOVE;if(x>=getWidth()*.40f&&lookPointer<0)return ROLE_LOOK;return ROLE_NONE;}
+    private int bitForRole(int role){switch(role){case ROLE_FIRE:return FIRE;case ROLE_AIM:return AIM;case ROLE_ACTION:return ACTION;case ROLE_WEAPON:return WEAPON;case ROLE_CROUCH:return CROUCH;case ROLE_START:return START;default:return 0;}}
+    private void setButtonRole(int role,boolean down){int bit=bitForRole(role);if(bit==0)return;if(down){buttons|=bit;performHapticFeedback(HapticFeedbackConstants.KEYBOARD_TAP);}else{buttons&=~bit;if(bit==AIM&&gyroMode==GYRO_AIM)gyroLookX=gyroLookY=gyroFilteredX=gyroFilteredY=0f;}pushState();invalidate();}
+
+    private void updateMove(float x,float y){float rad=Math.min(getWidth(),getHeight())*.115f*controlScale,dx=x-moveCx,dy=y-moveCy,len=(float)Math.hypot(dx,dy);if(len>rad){dx*=rad/len;dy*=rad/len;}float dead=.09f,nx=dx/rad,ny=-dy/rad,mag=(float)Math.hypot(nx,ny);if(mag<dead)nx=ny=0;else if(mag>0){float s=(mag-dead)/(1-dead)/mag;nx*=s;ny*=s;}moveX=clamp(nx,-1,1);moveY=clamp(ny,-1,1);pushState();invalidate();}
+    private void updateLook(float x,float y){float dx=x-lookLastX,dy=y-lookLastY;lookLastX=x;lookLastY=y;float sens=aiming()?aimSensitivity:touchSensitivity,base=Math.max(dp(26),Math.min(getWidth(),getHeight())*.040f);lookImpulseX=clamp(lookImpulseX+(dx/base)*sens,-3f,3f);lookImpulseY=clamp(lookImpulseY+(-dy/base)*sens,-3f,3f);ensureLookPump();}
+
+    @Override public void onSensorChanged(SensorEvent e){if(e.sensor.getType()!=Sensor.TYPE_GYROSCOPE)return;boolean active=gyroMode==GYRO_ALWAYS||(gyroMode==GYRO_AIM&&aiming());if(!active||settings){if(gyroLookX!=0f||gyroLookY!=0f){gyroLookX=gyroLookY=gyroFilteredX=gyroFilteredY=0f;pushState();}return;}float gx=e.values[0],gy=e.values[1],sx,sy;int rot=getDisplay()!=null?getDisplay().getRotation():Surface.ROTATION_0;switch(rot){case Surface.ROTATION_90:sx=gy;sy=-gx;break;case Surface.ROTATION_180:sx=-gx;sy=-gy;break;case Surface.ROTATION_270:sx=-gy;sy=gx;break;default:sx=gx;sy=gy;}if(Math.abs(sy)<.012f)sy=0f;if(Math.abs(sx)<.012f)sx=0f;float sens=aiming()?gyroAimSensitivity:gyroSensitivity,targetX=clamp(-sy*.72f*sens,-1f,1f),targetY=clamp(-sx*.72f*sens,-1f,1f);gyroFilteredX+=(targetX-gyroFilteredX)*.42f;gyroFilteredY+=(targetY-gyroFilteredY)*.42f;gyroLookX=Math.abs(gyroFilteredX)<.004f?0f:gyroFilteredX;gyroLookY=Math.abs(gyroFilteredY)<.004f?0f:gyroFilteredY;pushState();}
+    @Override public void onAccuracyChanged(Sensor sensor,int accuracy){}
+
+    @Override public boolean onTouchEvent(MotionEvent e){layoutControls();int ai=e.getActionIndex(),id=e.getPointerId(ai);switch(e.getActionMasked()){case MotionEvent.ACTION_DOWN:case MotionEvent.ACTION_POINTER_DOWN:{float x=e.getX(ai),y=e.getY(ai);if(settings){if(hit(gear,x,y)){settings=false;pushState();invalidate();return true;}if(hit(controlsTab,x,y)){settingsPage=SETTINGS_CONTROLS;invalidate();return true;}if(hit(videoTab,x,y)){settingsPage=SETTINGS_VIDEO;invalidate();return true;}if(settingsPage==SETTINGS_CONTROLS){if(hit(sensMinus,x,y))touchSensitivity=clamp(touchSensitivity-.10f,.25f,4f);else if(hit(sensPlus,x,y))touchSensitivity=clamp(touchSensitivity+.10f,.25f,4f);else if(hit(aimSensMinus,x,y))aimSensitivity=clamp(aimSensitivity-.10f,.25f,4f);else if(hit(aimSensPlus,x,y))aimSensitivity=clamp(aimSensitivity+.10f,.25f,4f);else if(hit(gyroModeToggle,x,y)){gyroMode=(gyroMode+1)%3;updateGyroRegistration();}else if(hit(gyroSensMinus,x,y))gyroSensitivity=clamp(gyroSensitivity-.10f,.10f,3f);else if(hit(gyroSensPlus,x,y))gyroSensitivity=clamp(gyroSensitivity+.10f,.10f,3f);else if(hit(gyroAimMinus,x,y))gyroAimSensitivity=clamp(gyroAimSensitivity-.10f,.10f,3f);else if(hit(gyroAimPlus,x,y))gyroAimSensitivity=clamp(gyroAimSensitivity+.10f,.10f,3f);else if(hit(alphaMinus,x,y))opacity=clamp(opacity-.08f,.15f,.90f);else if(hit(alphaPlus,x,y))opacity=clamp(opacity+.08f,.15f,.90f);else if(hit(scaleMinus,x,y))controlScale=clamp(controlScale-.08f,.70f,1.45f);else if(hit(scalePlus,x,y))controlScale=clamp(controlScale+.08f,.70f,1.45f);else if(hit(padToggle,x,y))hideOnGamepad=!hideOnGamepad;save();}else{if(hit(aspectToggle,x,y))videoAspect=(videoAspect+1)%3;else if(hit(renderToggle,x,y))renderScaleIndex=(renderScaleIndex+1)%3;else if(hit(msaaToggle,x,y))msaaIndex=(msaaIndex+1)%3;else if(hit(filterToggle,x,y))filterIndex=(filterIndex+1)%2;save();applyVideoSettings();}invalidate();return true;}int role=roleForDown(x,y);roles.put(id,role);if(role==ROLE_SETTINGS){settings=true;touchLookX=touchLookY=lookImpulseX=lookImpulseY=gyroLookX=gyroLookY=0f;pushState();invalidate();return true;}if(role==ROLE_MOVE){movePointer=id;moveCx=x;moveCy=y;updateMove(x,y);}else if(role==ROLE_LOOK){lookPointer=id;lookLastX=x;lookLastY=y;}else setButtonRole(role,true);return true;}case MotionEvent.ACTION_MOVE:for(int i=0;i<e.getPointerCount();i++){int pid=e.getPointerId(i),role=roles.get(pid,ROLE_NONE);if(role==ROLE_MOVE&&pid==movePointer)updateMove(e.getX(i),e.getY(i));else if(role==ROLE_LOOK&&pid==lookPointer)updateLook(e.getX(i),e.getY(i));}return true;case MotionEvent.ACTION_UP:case MotionEvent.ACTION_POINTER_UP:case MotionEvent.ACTION_CANCEL:{int role=roles.get(id,ROLE_NONE);if(role==ROLE_MOVE&&id==movePointer){movePointer=-1;moveX=moveY=0;pushState();}else if(role==ROLE_LOOK&&id==lookPointer)lookPointer=-1;else setButtonRole(role,false);roles.delete(id);invalidate();return true;}}return true;}
+
+    public void releaseAll(){roles.clear();movePointer=lookPointer=-1;moveX=moveY=touchLookX=touchLookY=gyroLookX=gyroLookY=0f;lookImpulseX=lookImpulseY=gyroFilteredX=gyroFilteredY=0f;buttons=0;handler.removeCallbacks(lookPump);lookPumpRunning=false;nativeClearTouchState();invalidate();}
+    private void save(){prefs.edit().putFloat("touchSensitivity",touchSensitivity).putFloat("aimSensitivity",aimSensitivity).putInt("gyroMode",gyroMode).putFloat("gyroSensitivity",gyroSensitivity).putFloat("gyroAimSensitivity",gyroAimSensitivity).putFloat("opacity",opacity).putFloat("scale",controlScale).putBoolean("hideOnGamepad",hideOnGamepad).putInt("videoAspect",videoAspect).putInt("renderScaleIndex",renderScaleIndex).putInt("msaaIndex",msaaIndex).putInt("filterIndex",filterIndex).apply();}
+    private float renderScaleValue(){return renderScaleIndex==2?2f:(renderScaleIndex==1?1.5f:1f);}private int msaaValue(){return msaaIndex==2?4:(msaaIndex==1?2:1);}private String aspectName(){return videoAspect==0?"4:3":(videoAspect==1?"16:9":"TELA");}private String renderName(){return renderScaleIndex==0?"1.0×":(renderScaleIndex==1?"1.5×":"2.0×");}private String msaaName(){return msaaIndex==0?"OFF":(msaaIndex==1?"2×":"4×");}private String filterName(){return filterIndex==0?"N64":"BILINEAR";}private String gyroModeName(){if(gyroSensor==null)return"SEM SENSOR";return gyroMode==GYRO_OFF?"DESLIGADO":(gyroMode==GYRO_AIM?"SÓ MIRA":"SEMPRE");}private void applyVideoSettings(){nativeSetVideoSettings(videoAspect,renderScaleValue(),msaaValue(),filterIndex);}
+    private void circle(Canvas c,RectF r,String label,boolean active){int a=(int)(255f*opacity*(active?1f:.72f));fill.setARGB(a,active?235:25,active?235:25,active?235:25);line.setARGB((int)(255f*opacity),255,255,255);c.drawOval(r,fill);c.drawOval(r,line);text.setARGB((int)(255f*opacity),255,255,255);text.setTextSize(Math.max(dp(11),r.height()*.19f));c.drawText(label,r.centerX(),r.centerY()-((text.ascent()+text.descent())/2),text);}private boolean on(int bit){return(buttons&bit)!=0;}
+    @Override protected void onDraw(Canvas c){super.onDraw(c);layoutControls();if(physicalGamepad&&hideOnGamepad&&!settings){circle(c,gear,"TOUCH",false);return;}float stickR=Math.min(getWidth(),getHeight())*.115f*controlScale,cx=movePointer>=0?moveCx:getWidth()*.155f,cy=movePointer>=0?moveCy:getHeight()*.74f;fill.setARGB((int)(255*opacity*.35f),20,20,20);line.setARGB((int)(255*opacity),255,255,255);c.drawCircle(cx,cy,stickR,fill);c.drawCircle(cx,cy,stickR,line);c.drawCircle(cx+moveX*stickR,cy-moveY*stickR,stickR*.42f,fill);c.drawCircle(cx+moveX*stickR,cy-moveY*stickR,stickR*.42f,line);circle(c,fire,"TIRO",on(FIRE));circle(c,aim,"MIRA",on(AIM));circle(c,action,"AÇÃO",on(ACTION));circle(c,weapon,"ARMA",on(WEAPON));circle(c,crouch,"AGACH.",on(CROUCH));circle(c,start,"II",on(START));circle(c,gear,"⚙",settings);if(settings)drawSettings(c);}
+    private void drawSettings(Canvas c){fill.setARGB(232,12,12,12);c.drawRoundRect(settingsPanel,dp(12),dp(12),fill);mini(c,controlsTab,settingsPage==SETTINGS_CONTROLS?"CONTROLES ✓":"CONTROLES");mini(c,videoTab,settingsPage==SETTINGS_VIDEO?"VÍDEO ✓":"VÍDEO");text.setARGB(255,255,255,255);float l=settingsPanel.left,t=settingsPanel.top,pw=settingsPanel.width(),ph=settingsPanel.height();if(settingsPage==SETTINGS_CONTROLS){text.setTextSize(dp(12));label(c,"CÂMERA TOUCH  "+String.format("%.2f",touchSensitivity),l+pw*.25f,t+ph*.145f);label(c,"MIRA TOUCH  "+String.format("%.2f",aimSensitivity),l+pw*.75f,t+ph*.145f);mini(c,sensMinus,"−");mini(c,sensPlus,"+");mini(c,aimSensMinus,"−");mini(c,aimSensPlus,"+");label(c,"GIROSCÓPIO",l+pw*.25f,t+ph*.310f);label(c,"SENS. GIRO  "+String.format("%.2f",gyroSensitivity),l+pw*.75f,t+ph*.310f);mini(c,gyroModeToggle,gyroModeName());mini(c,gyroSensMinus,"−");mini(c,gyroSensPlus,"+");label(c,"GIRO MIRA  "+String.format("%.2f",gyroAimSensitivity),l+pw*.25f,t+ph*.475f);label(c,"TAMANHO",l+pw*.75f,t+ph*.475f);mini(c,gyroAimMinus,"−");mini(c,gyroAimPlus,"+");mini(c,scaleMinus,"−");mini(c,scalePlus,"+");label(c,"OPACIDADE",l+pw*.25f,t+ph*.640f);label(c,"GAMEPAD",l+pw*.75f,t+ph*.640f);mini(c,alphaMinus,"−");mini(c,alphaPlus,"+");mini(c,padToggle,hideOnGamepad?"AUTO-HIDE":"SEMPRE");}else{text.setTextSize(dp(13));label(c,"PROPORÇÃO",l+pw*.26f,t+ph*.190f);label(c,"RESOLUÇÃO",l+pw*.74f,t+ph*.190f);mini(c,aspectToggle,"ASPECTO  "+aspectName());mini(c,renderToggle,"RESOL.  "+renderName());label(c,"ANTI-ALIASING",l+pw*.26f,t+ph*.490f);label(c,"TEXTURAS",l+pw*.74f,t+ph*.490f);mini(c,msaaToggle,"MSAA  "+msaaName());mini(c,filterToggle,"FILTRO  "+filterName());}}
+    private void label(Canvas c,String s,float x,float y){c.drawText(s,x,y,text);}private void mini(Canvas c,RectF r,String s){fill.setARGB(230,55,55,55);c.drawRoundRect(r,dp(7),dp(7),fill);text.setTextSize(dp(13));c.drawText(s,r.centerX(),r.centerY()-((text.ascent()+text.descent())/2),text);}
+    private static native void nativeSetTouchState(float moveX,float moveY,float lookX,float lookY,int buttons);private static native void nativeClearTouchState();private static native void nativeSetVideoSettings(int aspectMode,float renderScale,int msaa,int filterMode);
+}
+'''
+(root/'android/app/src/main/java/com/gevr/port/TouchOverlayView.java').write_text(overlay_src)
+
+main=root/'android/app/src/main/java/com/gevr/port/MainActivity.java'
+s=main.read_text()
+old='''    @Override protected void onResume() {
+        super.onResume();
+        if (nativeReady) nativeAudioResume();
+    }
+
+    @Override protected void onPause() {
+        if (overlay != null) overlay.releaseAll();
+        if (nativeReady) nativeAudioPause();
+        super.onPause();
+    }'''
+new='''    @Override protected void onResume() {
+        super.onResume();
+        if (overlay != null) overlay.onHostResume();
+        if (nativeReady) nativeAudioResume();
+    }
+
+    @Override protected void onPause() {
+        if (overlay != null) {
+            overlay.onHostPause();
+            overlay.releaseAll();
+        }
+        if (nativeReady) nativeAudioPause();
+        super.onPause();
+    }'''
+if old not in s: raise SystemExit('MainActivity lifecycle anchor not found')
+main.write_text(s.replace(old,new,1))
+manifest=root/'android/app/src/main/AndroidManifest.xml'
+m=manifest.read_text(); needle='    <uses-feature android:glEsVersion="0x00030000" android:required="true" />'
+if needle not in m: raise SystemExit('manifest GLES anchor not found')
+manifest.write_text(m.replace(needle,needle+'\n    <uses-feature android:name="android.hardware.sensor.gyroscope" android:required="false" />',1))
+print('v7 applied')
+PYV7
+          python3 /tmp/apply_v7.py
+
+      - name: Install Android NDK and CMake
+        run: |
+          yes | "$ANDROID_HOME/cmdline-tools/latest/bin/sdkmanager" --licenses >/dev/null || true
+          "$ANDROID_HOME/cmdline-tools/latest/bin/sdkmanager" "platforms;android-34" "build-tools;34.0.0" "ndk;25.1.8937393" "cmake;3.22.1"
+
+      - name: Build debug APK
+        working-directory: upstream/android
+        run: |
+          chmod +x gradlew
+          ./gradlew --no-daemon assembleDebug --stacktrace
+
+      - name: Verify and package skeleton
+        run: |
+          APK=upstream/android/app/build/outputs/apk/debug/app-debug.apk
+          test -f "$APK"
+          python3 - <<'PY'
+          import zipfile
+          apk='upstream/android/app/build/outputs/apk/debug/app-debug.apk'
+          with zipfile.ZipFile(apk) as z:
+              i=z.getinfo('assets/ge.z64')
+              assert i.file_size == 12*1024*1024
+              assert i.compress_type == zipfile.ZIP_STORED
+              assert 'lib/arm64-v8a/libgevr.so' in z.namelist()
+          print('v7 skeleton verified')
+          PY
+          mkdir -p /tmp/geflat-output
+          cp "$APK" /tmp/geflat-output/GoldenEye007-Android-ARM64-skeleton-v7.apk
+          cp "$ANDROID_HOME/build-tools/34.0.0/lib/apksigner.jar" /tmp/geflat-output/apksigner.jar
+          test -f "$HOME/.android/debug.keystore"
+          cp "$HOME/.android/debug.keystore" /tmp/geflat-output/goldeneye-v7.keystore
+
+      - name: Upload signing skeleton
+        uses: actions/upload-artifact@v4
+        with:
+          name: GoldenEye007-Android-ARM64-skeleton-v7
+          path: /tmp/geflat-output/
+          if-no-files-found: error
+          retention-days: 1
