@@ -1,0 +1,90 @@
+name: GoldenEye Flat Android v7 Final
+
+on:
+  push:
+    branches: [chatgpt-goldeneye-apk]
+    paths:
+      - '.github/workflows/goldeneye-flat-android-v7-final.yml'
+  workflow_dispatch:
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    steps:
+      - name: Checkout build harness
+        uses: actions/checkout@v4
+        with:
+          ref: chatgpt-goldeneye-apk
+
+      - name: Reassemble kit and generated patches
+        run: |
+          cat geflat/kit.part* | base64 -d > /tmp/geflat-kit.zip
+          mkdir -p /tmp/geflat-kit
+          unzip -q /tmp/geflat-kit.zip -d /tmp/geflat-kit
+          git clone --depth 1 --branch v0.5.6 https://github.com/MrSco/goldeneye-vr.git upstream
+          python3 - <<'PY'
+          from pathlib import Path
+          import re, textwrap, base64, gzip
+          y4=Path('.github/workflows/goldeneye-flat-android-v4.yml').read_text()
+          b4=re.findall(r"          python3 - <<'PY'\n(.*?)\n          PY",y4,flags=re.S)
+          Path('/tmp/v4_pre.py').write_text(textwrap.dedent(b4[0])); Path('/tmp/v4_post.py').write_text(textwrap.dedent(b4[1]))
+          y5=Path('.github/workflows/goldeneye-flat-android-v5.yml').read_text()
+          b5=re.findall(r"          python3 - <<'PY'\n(.*?)\n          PY",y5,flags=re.S)
+          Path('/tmp/v5.py').write_text(textwrap.dedent(b5[1]))
+          y6=Path('.github/workflows/goldeneye-flat-android-v6.yml').read_text()
+          m6=re.search(r"cat > /tmp/apply_v6\.py\.gz\.b64 <<'B64'\n(.*?)\n          B64",y6,flags=re.S)
+          if not m6: raise SystemExit('v6 payload missing')
+          p6=''.join(x.strip() for x in m6.group(1).splitlines())
+          Path('/tmp/apply_v6.py').write_bytes(gzip.decompress(base64.b64decode(p6)))
+          y7=Path('.github/workflows/goldeneye-flat-android-v7.yml').read_text()
+          m7=re.search(r"cat > /tmp/apply_v7\.py\.gz\.b64 <<'B64'\n(.*?)\n          B64",y7,flags=re.S)
+          if not m7: raise SystemExit('v7 payload missing')
+          p7=''.join(x.strip() for x in m7.group(1).splitlines())
+          Path('/tmp/apply_v7.py').write_bytes(gzip.decompress(base64.b64decode(p7)))
+          PY
+          python3 /tmp/v4_pre.py
+          python3 /tmp/geflat-kit/GoldenEyeAndroidFlatPort_CI/tools/apply_flat_port.py "$GITHUB_WORKSPACE/upstream"
+          python3 /tmp/v4_post.py
+          python3 /tmp/v5.py
+          python3 /tmp/apply_v6.py
+          python3 /tmp/apply_v7.py
+
+      - name: Install Android NDK and CMake
+        run: |
+          yes | "$ANDROID_HOME/cmdline-tools/latest/bin/sdkmanager" --licenses >/dev/null || true
+          "$ANDROID_HOME/cmdline-tools/latest/bin/sdkmanager" "platforms;android-34" "build-tools;34.0.0" "ndk;25.1.8937393" "cmake;3.22.1"
+
+      - name: Build debug APK
+        working-directory: upstream/android
+        run: |
+          chmod +x gradlew
+          ./gradlew --no-daemon assembleDebug --stacktrace
+
+      - name: Verify and package skeleton
+        run: |
+          APK=upstream/android/app/build/outputs/apk/debug/app-debug.apk
+          test -f "$APK"
+          python3 - <<'PY'
+          import zipfile
+          apk='upstream/android/app/build/outputs/apk/debug/app-debug.apk'
+          with zipfile.ZipFile(apk) as z:
+              i=z.getinfo('assets/ge.z64')
+              assert i.file_size == 12*1024*1024
+              assert i.compress_type == zipfile.ZIP_STORED
+              assert 'lib/arm64-v8a/libgevr.so' in z.namelist()
+              assert 'lib/arm64-v8a/libSDL2.so' in z.namelist()
+          print('v7 final skeleton verified')
+          PY
+          mkdir -p /tmp/geflat-output
+          cp "$APK" /tmp/geflat-output/GoldenEye007-Android-ARM64-skeleton-v7.apk
+          cp "$ANDROID_HOME/build-tools/34.0.0/lib/apksigner.jar" /tmp/geflat-output/apksigner.jar
+          sha256sum "$APK"
+
+      - name: Upload signing skeleton
+        uses: actions/upload-artifact@v4
+        with:
+          name: GoldenEye007-Android-ARM64-skeleton-v7-final
+          path: /tmp/geflat-output/
+          if-no-files-found: error
+          retention-days: 1
