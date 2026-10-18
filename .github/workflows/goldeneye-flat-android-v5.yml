@@ -1,0 +1,123 @@
+name: GoldenEye Flat Android v5
+
+on:
+  push:
+    branches: [chatgpt-goldeneye-apk]
+    paths:
+      - '.github/workflows/goldeneye-flat-android-v5.yml'
+  workflow_dispatch:
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    steps:
+      - name: Checkout build harness
+        uses: actions/checkout@v4
+        with:
+          ref: chatgpt-goldeneye-apk
+
+      - name: Reassemble flat-port kit
+        run: |
+          cat geflat/kit.part* | base64 -d > /tmp/geflat-kit.zip
+          mkdir -p /tmp/geflat-kit
+          unzip -q /tmp/geflat-kit.zip -d /tmp/geflat-kit
+          test -f /tmp/geflat-kit/GoldenEyeAndroidFlatPort_CI/tools/apply_flat_port.py
+
+      - name: Checkout GoldenEye VR v0.5.6
+        run: |
+          git clone --depth 1 --branch v0.5.6 https://github.com/MrSco/goldeneye-vr.git upstream
+
+      - name: Reuse v4 patches
+        run: |
+          python3 - <<'PY'
+          from pathlib import Path
+          import re, textwrap
+          y = Path('.github/workflows/goldeneye-flat-android-v4.yml').read_text()
+          blocks = re.findall(r"          python3 - <<'PY'\n(.*?)\n          PY", y, flags=re.S)
+          if len(blocks) < 2:
+              raise SystemExit(f'expected two Python blocks in v4 workflow, got {len(blocks)}')
+          Path('/tmp/v4_pre.py').write_text(textwrap.dedent(blocks[0]))
+          Path('/tmp/v4_post.py').write_text(textwrap.dedent(blocks[1]))
+          PY
+          python3 /tmp/v4_pre.py
+          python3 /tmp/geflat-kit/GoldenEyeAndroidFlatPort_CI/tools/apply_flat_port.py "$GITHUB_WORKSPACE/upstream"
+          python3 /tmp/v4_post.py
+
+      - name: Apply v5 full-screen viewport fix
+        run: |
+          python3 - <<'PY'
+          from pathlib import Path
+
+          # The VR fork initializes gfx_current_dimensions from GoldenEye's low
+          # internal video mode (native viewport is 320x220). On desktop the normal
+          # frame path promotes that state as the window changes, but our early flat
+          # Android return kept the low dimensions. The result was a correctly
+          # rendered, almost native-size image in the corner of a phone surface.
+          gfx = Path('upstream/port/fast3d/gfx_pc.cpp')
+          s = gfx.read_text()
+          marker = '''#ifdef GE_ANDROID_FLAT\n    /* Smartphone path: ordinary single-view GLES framebuffer. */\n'''
+          i = s.find(marker)
+          if i < 0:
+              raise SystemExit('flat gfx_run marker not found')
+          j = s.find('    gfx_update_aspect_mode();', i)
+          if j < 0:
+              raise SystemExit('flat aspect update anchor not found')
+          inject = '''    /* v5: drive Fast3D from the real Android drawable, not the N64-sized\n       logical video mode. This makes viewport/scissor scaling use the full phone\n       surface while leaving gfx_current_native_viewport at 320x220 for game math. */\n    const uint32_t flatW = gfx_current_window_dimensions.width;\n    const uint32_t flatH = gfx_current_window_dimensions.height;\n    if (flatW > 0 && flatH > 0) {\n        gfx_current_dimensions.internal_mul = 1.0f;\n        gfx_current_dimensions.width = flatW;\n        gfx_current_dimensions.height = flatH;\n        gfx_current_dimensions.aspect_ratio = (float)flatW / (float)flatH;\n        gfx_current_game_window_viewport.x = 0;\n        gfx_current_game_window_viewport.y = 0;\n        gfx_current_game_window_viewport.width = flatW;\n        gfx_current_game_window_viewport.height = flatH;\n    }\n'''
+          s = s[:j] + inject + s[j:]
+          gfx.write_text(s)
+
+          # Ask SDL for the physical display size on Android instead of creating
+          # the GL window from the game's low logical width/height.
+          sdl = Path('upstream/port/fast3d/gfx_sdl2.cpp')
+          ss = sdl.read_text()
+          old = '''#ifdef GE_ANDROID_FLAT\n    window_width = set->width > 0 ? set->width : 1280;\n    window_height = set->height > 0 ? set->height : 720;\n#else\n    window_width = VrRecommendedW;\n    window_height = VrRecommendedH;\n#endif'''
+          new = '''#ifdef GE_ANDROID_FLAT\n    SDL_DisplayMode flatMode = {};\n    if (SDL_GetCurrentDisplayMode(0, &flatMode) == 0 && flatMode.w > 0 && flatMode.h > 0) {\n        window_width = flatMode.w;\n        window_height = flatMode.h;\n    } else {\n        window_width = set->width > 0 ? set->width : 1280;\n        window_height = set->height > 0 ? set->height : 720;\n    }\n#else\n    window_width = VrRecommendedW;\n    window_height = VrRecommendedH;\n#endif'''
+          if old not in ss:
+              raise SystemExit('v4 SDL flat-size block not found')
+          sdl.write_text(ss.replace(old, new, 1))
+
+          # Export the actual dimensions used by the build log for sanity.
+          print('v5 patches applied: drawable-sized Fast3D viewport + display-sized SDL window')
+          PY
+
+      - name: Install Android NDK and CMake
+        run: |
+          yes | "$ANDROID_HOME/cmdline-tools/latest/bin/sdkmanager" --licenses >/dev/null || true
+          "$ANDROID_HOME/cmdline-tools/latest/bin/sdkmanager" \
+            "platforms;android-34" \
+            "build-tools;34.0.0" \
+            "ndk;25.1.8937393" \
+            "cmake;3.22.1"
+
+      - name: Build debug APK
+        working-directory: upstream/android
+        run: |
+          chmod +x gradlew
+          ./gradlew --no-daemon assembleDebug --stacktrace
+
+      - name: Verify reserved ROM slot
+        run: |
+          APK=upstream/android/app/build/outputs/apk/debug/app-debug.apk
+          test -f "$APK"
+          python3 - <<'PY'
+          import zipfile
+          apk='upstream/android/app/build/outputs/apk/debug/app-debug.apk'
+          with zipfile.ZipFile(apk) as z:
+              i=z.getinfo('assets/ge.z64')
+              assert i.file_size == 12*1024*1024, i.file_size
+              assert i.compress_type == zipfile.ZIP_STORED, i.compress_type
+              print('ROM slot OK:', i.file_size, 'bytes, STORED')
+          PY
+          mkdir -p /tmp/geflat-output
+          cp "$APK" /tmp/geflat-output/GoldenEye007-Android-ARM64-skeleton-v5.apk
+          cp "$ANDROID_HOME/build-tools/34.0.0/lib/apksigner.jar" /tmp/geflat-output/apksigner.jar
+          sha256sum "$APK"
+
+      - name: Upload signing skeleton
+        uses: actions/upload-artifact@v4
+        with:
+          name: GoldenEye007-Android-ARM64-skeleton-v5
+          path: /tmp/geflat-output/
+          if-no-files-found: error
+          retention-days: 1
