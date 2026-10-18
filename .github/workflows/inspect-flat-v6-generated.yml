@@ -45,14 +45,17 @@ jobs:
           mkdir -p /tmp/inspect-v6
           cp upstream/android/app/src/main/java/com/gevr/port/MainActivity.java /tmp/inspect-v6/
           cp upstream/android/app/src/main/java/com/gevr/port/TouchControls.java /tmp/inspect-v6/ || true
+          cp upstream/android/app/src/main/java/com/gevr/port/TouchOverlayView.java /tmp/inspect-v6/ || true
           cp upstream/android/app/src/main/java/com/gevr/port/TouchControlOverlay.java /tmp/inspect-v6/ || true
           cp upstream/android/app/src/main/AndroidManifest.xml /tmp/inspect-v6/
           cp upstream/port/src/input.c /tmp/inspect-v6/input.c
           cp upstream/port/src/video.c /tmp/inspect-v6/video.c
           cp upstream/port/fast3d/gfx_pc.cpp /tmp/inspect-v6/gfx_pc.cpp
-          grep -R "nativeTouch\|nativeStick\|nativeButton\|TouchControl\|videoQuality\|quality\|sensitivity" -n upstream/android upstream/port/src > /tmp/inspect-v6/grep.txt || true
+          find upstream -type f \( -iname '*geflat*' -o -iname '*flat_touch*' -o -iname '*touch*bridge*' \) -print > /tmp/inspect-v6/flatfiles.txt || true
+          while IFS= read -r f; do cp "$f" "/tmp/inspect-v6/$(basename "$f")" 2>/dev/null || true; done < /tmp/inspect-v6/flatfiles.txt
+          grep -R "nativeTouch\|nativeStick\|nativeButton\|TouchControl\|TouchOverlay\|videoQuality\|quality\|sensitivity\|geflatTouch" -n upstream/android upstream/port/src > /tmp/inspect-v6/grep.txt || true
       - uses: actions/upload-artifact@v4
         with:
-          name: flat-v6-generated-sources
+          name: flat-v6-generated-sources-full
           path: /tmp/inspect-v6
           retention-days: 1
