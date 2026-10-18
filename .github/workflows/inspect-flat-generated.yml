@@ -1,0 +1,48 @@
+name: Inspect Flat Generated
+
+on:
+  workflow_dispatch:
+  push:
+    branches: [chatgpt-goldeneye-apk]
+    paths:
+      - '.github/workflows/inspect-flat-generated.yml'
+
+jobs:
+  inspect:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: chatgpt-goldeneye-apk
+      - name: Reassemble kit
+        run: |
+          cat geflat/kit.part* | base64 -d > /tmp/geflat-kit.zip
+          mkdir -p /tmp/geflat-kit
+          unzip -q /tmp/geflat-kit.zip -d /tmp/geflat-kit
+          git clone --depth 1 --branch v0.5.6 https://github.com/MrSco/goldeneye-vr.git upstream
+          python3 - <<'PY'
+          from pathlib import Path
+          p=Path('upstream/port/fast3d/gfx_sdl2.cpp')
+          s=p.read_text()
+          old='#ifndef ANDROID\n    SDL_GL_MakeCurrent(wnd, ctx);'
+          new='#ifndef ANDROID // if PC\n\n    SDL_GL_MakeCurrent(wnd, ctx);'
+          if old not in s: raise SystemExit('anchor missing')
+          p.write_text(s.replace(old,new,1))
+          PY
+          python3 /tmp/geflat-kit/GoldenEyeAndroidFlatPort_CI/tools/apply_flat_port.py "$GITHUB_WORKSPACE/upstream"
+      - name: Collect generated sources
+        run: |
+          mkdir -p /tmp/inspect
+          cp upstream/android/app/src/main/java/com/gevr/port/MainActivity.java /tmp/inspect/
+          cp upstream/android/app/src/main/java/com/gevr/port/TouchControls.java /tmp/inspect/
+          cp upstream/android/app/src/main/AndroidManifest.xml /tmp/inspect/
+          cp upstream/port/src/video.c /tmp/inspect/video.c
+          cp upstream/src/fr.c /tmp/inspect/fr.c
+          cp upstream/port/fast3d/gfx_pc.cpp /tmp/inspect/gfx_pc.cpp
+          cp upstream/port/fast3d/gfx_opengl.cpp /tmp/inspect/gfx_opengl.cpp
+          grep -R "nativeTouch\|nativeStick\|nativeButton\|GE_ANDROID_FLAT" -n upstream/android upstream/port/src upstream/port/fast3d > /tmp/inspect/grep.txt || true
+      - uses: actions/upload-artifact@v4
+        with:
+          name: flat-generated-sources
+          path: /tmp/inspect
+          retention-days: 1
