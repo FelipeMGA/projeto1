@@ -46,12 +46,12 @@ jobs:
           python3 /tmp/apply_v6.py
           python3 /tmp/apply_v7.py
 
-      - name: Show touch gyro implementation
+      - name: Show exact v7 control source
         run: |
-          echo '=== matching files ==='
-          grep -RIlE 'GIROSC|Gyro|gyro|TYPE_GYROSCOPE|C.MERA TOUCH|SENS\. GIRO|MIRA TOUCH' upstream/android upstream/src 2>/dev/null || true
-          echo '=== excerpts ==='
-          while IFS= read -r f; do
-            echo "===== FILE: $f ====="
-            grep -n -C 18 -E 'GIROSC|Gyro|gyro|TYPE_GYROSCOPE|C.MERA TOUCH|SENS\. GIRO|MIRA TOUCH|lookSensitivity|aimSensitivity|sensor' "$f" || true
-          done < <(grep -RIlE 'GIROSC|Gyro|gyro|TYPE_GYROSCOPE|C.MERA TOUCH|SENS\. GIRO|MIRA TOUCH|lookSensitivity|aimSensitivity' upstream/android upstream/src 2>/dev/null | head -40)
+          F=upstream/android/app/src/main/java/com/gevr/port/TouchOverlayView.java
+          echo '=== HEADER + FIELDS ==='
+          sed -n '1,180p' "$F"
+          echo '=== LAYOUT + INPUT CORE ==='
+          sed -n '200,470p' "$F"
+          echo '=== SETTINGS + DRAW ==='
+          sed -n '470,590p' "$F"
