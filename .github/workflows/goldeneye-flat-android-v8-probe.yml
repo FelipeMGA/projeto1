@@ -1,0 +1,57 @@
+name: GoldenEye Flat Android v8 Probe
+
+on:
+  push:
+    branches: [chatgpt-goldeneye-apk]
+    paths:
+      - '.github/workflows/goldeneye-flat-android-v8-probe.yml'
+  workflow_dispatch:
+
+jobs:
+  probe:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - name: Checkout build harness
+        uses: actions/checkout@v4
+        with:
+          ref: chatgpt-goldeneye-apk
+
+      - name: Reassemble v7 source tree
+        run: |
+          cat geflat/kit.part* | base64 -d > /tmp/geflat-kit.zip
+          mkdir -p /tmp/geflat-kit
+          unzip -q /tmp/geflat-kit.zip -d /tmp/geflat-kit
+          git clone --depth 1 --branch v0.5.6 https://github.com/MrSco/goldeneye-vr.git upstream
+          python3 - <<'PY'
+          from pathlib import Path
+          import re, textwrap, base64, gzip
+          y4=Path('.github/workflows/goldeneye-flat-android-v4.yml').read_text()
+          b4=re.findall(r"          python3 - <<'PY'\n(.*?)\n          PY",y4,flags=re.S)
+          Path('/tmp/v4_pre.py').write_text(textwrap.dedent(b4[0])); Path('/tmp/v4_post.py').write_text(textwrap.dedent(b4[1]))
+          y5=Path('.github/workflows/goldeneye-flat-android-v5.yml').read_text()
+          b5=re.findall(r"          python3 - <<'PY'\n(.*?)\n          PY",y5,flags=re.S)
+          Path('/tmp/v5.py').write_text(textwrap.dedent(b5[1]))
+          for ver in (6,7):
+              y=Path(f'.github/workflows/goldeneye-flat-android-v{ver}.yml').read_text()
+              m=re.search(rf"cat > /tmp/apply_v{ver}\.py\.gz\.b64 <<'B64'\n(.*?)\n          B64",y,flags=re.S)
+              if not m: raise SystemExit(f'v{ver} payload missing')
+              p=''.join(x.strip() for x in m.group(1).splitlines())
+              Path(f'/tmp/apply_v{ver}.py').write_bytes(gzip.decompress(base64.b64decode(p)))
+          PY
+          python3 /tmp/v4_pre.py
+          python3 /tmp/geflat-kit/GoldenEyeAndroidFlatPort_CI/tools/apply_flat_port.py "$GITHUB_WORKSPACE/upstream"
+          python3 /tmp/v4_post.py
+          python3 /tmp/v5.py
+          python3 /tmp/apply_v6.py
+          python3 /tmp/apply_v7.py
+
+      - name: Show touch gyro implementation
+        run: |
+          echo '=== matching files ==='
+          grep -RIlE 'GIROSC|Gyro|gyro|TYPE_GYROSCOPE|C.MERA TOUCH|SENS\. GIRO|MIRA TOUCH' upstream/android upstream/src 2>/dev/null || true
+          echo '=== excerpts ==='
+          while IFS= read -r f; do
+            echo "===== FILE: $f ====="
+            grep -n -C 18 -E 'GIROSC|Gyro|gyro|TYPE_GYROSCOPE|C.MERA TOUCH|SENS\. GIRO|MIRA TOUCH|lookSensitivity|aimSensitivity|sensor' "$f" || true
+          done < <(grep -RIlE 'GIROSC|Gyro|gyro|TYPE_GYROSCOPE|C.MERA TOUCH|SENS\. GIRO|MIRA TOUCH|lookSensitivity|aimSensitivity' upstream/android upstream/src 2>/dev/null | head -40)
